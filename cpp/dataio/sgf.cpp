@@ -316,6 +316,15 @@ static void checkNonEmpty(const vector<SgfNode*>& nodes) {
     throw StringError("Empty sgf");
 }
 
+BoardShape SgfNode::getBoardShape(BoardShape defaultShape) const {
+  return hasProperty("BS") ? BoardShapeIO::parse(getSingleProperty("BS")) : defaultShape;
+}
+
+BoardShape Sgf::getBoardShape(BoardShape defaultShape) const {
+  checkNonEmpty(nodes);
+  return nodes[0]->getBoardShape(defaultShape);
+}
+
 XYSize Sgf::getXYSize() const {
   checkNonEmpty(nodes);
   int xSize = 0; //Initialize to 0 to suppress spurious clang compiler warning.
@@ -533,7 +542,8 @@ void Sgf::loadAllUniquePositions(
   bool hashParent,
   bool allowGameOver,
   Rand* rand,
-  vector<PositionSample>& samples
+  vector<PositionSample>& samples,
+  BoardShape defaultShape
 ) const {
   std::function<void(PositionSample&, const BoardHistory&, const string&)> f = [&samples](PositionSample& sample, const BoardHistory& hist, const string& comments) {
     (void)hist;
@@ -541,7 +551,7 @@ void Sgf::loadAllUniquePositions(
     samples.push_back(sample);
   };
 
-  iterAllUniquePositions(uniqueHashes,hashComments,hashParent,allowGameOver,rand,f);
+  iterAllUniquePositions(uniqueHashes,hashComments,hashParent,allowGameOver,rand,f,defaultShape);
 }
 
 void Sgf::iterAllUniquePositions(
@@ -550,13 +560,14 @@ void Sgf::iterAllUniquePositions(
   bool hashParent,
   bool allowGameOver,
   Rand* rand,
-  std::function<void(PositionSample&,const BoardHistory&,const std::string&)> f
+  std::function<void(PositionSample&,const BoardHistory&,const std::string&)> f,
+  BoardShape defaultShape
 ) const {
   XYSize size = getXYSize();
   int xSize = size.x;
   int ySize = size.y;
 
-  Board board(xSize,ySize);
+  Board board(xSize,ySize,getBoardShape(defaultShape));
   Player nextPla = nodes.size() > 0 ? nodes[0]->getPLSpecifiedColor() : C_EMPTY;
   if(nextPla == C_EMPTY)
     nextPla = C_BLACK;
@@ -651,7 +662,7 @@ void Sgf::iterAllUniquePositionsHelper(
 
         throw StringError(
           "Illegal move in " + fileName + " effective turn " + Global::int64ToString(j+initialTurnNumber) + " move " +
-          Location::toString(buf[j].loc, board.x_size, board.y_size) + " SGF trace (branches 0-indexed): " + trace.str()
+          Location::toString(buf[j].loc, board) + " SGF trace (branches 0-indexed): " + trace.str()
         );
       }
       if(hist.moveHistory.size() > 0x3FFFFFFF)
@@ -805,6 +816,7 @@ string Sgf::PositionSample::toJsonLine(const Sgf::PositionSample& sample) {
   json data;
   data["xSize"] = sample.board.x_size;
   data["ySize"] = sample.board.y_size;
+  data["shape"] = BoardShapeIO::toString(sample.board.shape);
   data["board"] = Board::toStringSimple(sample.board,'/');
   data["nextPla"] = PlayerIO::playerToStringShort(sample.nextPla);
   vector<string> moveLocs;
@@ -830,7 +842,8 @@ Sgf::PositionSample Sgf::PositionSample::ofJsonLine(const string& s) {
   try {
     int xSize = data["xSize"].get<int>();
     int ySize = data["ySize"].get<int>();
-    sample.board = Board::parseBoard(xSize,ySize,data["board"].get<string>(),'/');
+    BoardShape shape = BoardShapeIO::parse(data["shape"].get<string>());
+    sample.board = Board::parseBoard(xSize,ySize,shape,data["board"].get<string>(),'/');
     sample.nextPla = PlayerIO::parsePlayer(data["nextPla"].get<string>());
     vector<string> moveLocs = data["moveLocs"].get<vector<string>>();
     vector<string> movePlas = data["movePlas"].get<vector<string>>();
@@ -867,7 +880,7 @@ Sgf::PositionSample Sgf::PositionSample::ofJsonLine(const string& s) {
 
 Sgf::PositionSample Sgf::PositionSample::getColorFlipped() const {
   Sgf::PositionSample other = *this;
-  Board newBoard(other.board.x_size,other.board.y_size);
+  Board newBoard(other.board.x_size,other.board.y_size,other.board.shape);
   for(int y = 0; y < other.board.y_size; y++) {
     for(int x = 0; x < other.board.x_size; x++) {
       Loc loc = Location::getLoc(x,y,other.board.x_size);
@@ -1336,7 +1349,7 @@ Rules CompactSgf::getRulesOrWarn(const Rules& defaultRules, std::function<void(c
 }
 
 
-void CompactSgf::setupInitialBoardAndHist(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist) const {
+void CompactSgf::setupInitialBoardAndHist(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, BoardShape defaultShape) const {
   Color plPlayer = rootNode.getPLSpecifiedColor();
   if(plPlayer == P_BLACK || plPlayer == P_WHITE)
     nextPla = plPlayer;
@@ -1355,7 +1368,7 @@ void CompactSgf::setupInitialBoardAndHist(const Rules& initialRules, Board& boar
       nextPla = P_BLACK;
   }
 
-  board = Board(xSize,ySize);
+  board = Board(xSize,ySize,rootNode.getBoardShape(defaultShape));
   bool suc = board.setStones(placements);
   if(!suc)
     throw StringError("setupInitialBoardAndHist: initial board position contains invalid stones or zero-liberty stones");
@@ -1389,18 +1402,18 @@ void CompactSgf::playMovesTolerant(Board& board, Player& nextPla, BoardHistory& 
   for(int64_t i = 0; i<turnIdx; i++) {
     bool suc = hist.makeBoardMoveTolerant(board,moves[i].loc,moves[i].pla);
     if(!suc)
-      throw StringError("Illegal move in " + fileName + " turn " + Global::int64ToString(i) + " move " + Location::toString(moves[i].loc, board.x_size, board.y_size));
+      throw StringError("Illegal move in " + fileName + " turn " + Global::int64ToString(i) + " move " + Location::toString(moves[i].loc, board));
     nextPla = getOpp(moves[i].pla);
   }
 }
 
-void CompactSgf::setupBoardAndHistAssumeLegal(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx) const {
-  setupInitialBoardAndHist(initialRules, board, nextPla, hist);
+void CompactSgf::setupBoardAndHistAssumeLegal(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx, BoardShape defaultShape) const {
+  setupInitialBoardAndHist(initialRules, board, nextPla, hist, defaultShape);
   playMovesAssumeLegal(board, nextPla, hist, turnIdx);
 }
 
-void CompactSgf::setupBoardAndHistTolerant(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx) const {
-  setupInitialBoardAndHist(initialRules, board, nextPla, hist);
+void CompactSgf::setupBoardAndHistTolerant(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx, BoardShape defaultShape) const {
+  setupInitialBoardAndHist(initialRules, board, nextPla, hist, defaultShape);
   playMovesTolerant(board, nextPla, hist, turnIdx);
 }
 
@@ -1445,7 +1458,7 @@ void WriteSgf::writeSgf(
 
   int xSize = initialBoard.x_size;
   int ySize = initialBoard.y_size;
-  out << "(;FF[4]GM[1]";
+  out << "(;FF[4]GM[1]BS[" << BoardShapeIO::toString(initialBoard.shape) << "]";
   if(xSize == ySize)
     out << "SZ[" << xSize << "]";
   else

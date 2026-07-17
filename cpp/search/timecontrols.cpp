@@ -184,7 +184,7 @@ static double applyLagBuffer(double time, double lagBuffer) {
 void TimeControls::getTime(const Board& board, const BoardHistory& hist, double lagBuffer, double& minTime, double& recommendedTime, double& maxTime) const {
   (void)hist;
 
-  int boardArea = board.x_size * board.y_size;
+  int boardArea = board.playableArea();
   int numStonesOnBoard = board.numStonesOnBoard();
 
   //Very crude way to estimate game progress

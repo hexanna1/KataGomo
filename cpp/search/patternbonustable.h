@@ -40,7 +40,8 @@ struct PatternBonusTable {
     size_t maxFiles,
     const std::vector<std::string>& allowedPlayerNames,
     Logger& logger,
-    const std::string& logSource
+    const std::string& logSource,
+    BoardShape defaultShape
   );
 };
 

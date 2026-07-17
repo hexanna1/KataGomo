@@ -54,8 +54,10 @@ bool Search::initNodeNNOutput(
     vector<std::shared_ptr<NNOutput>> ptrs;
     std::array<int, SymmetryHelpers::NUM_SYMMETRIES> symmetryIndexes;
     std::iota(symmetryIndexes.begin(), symmetryIndexes.end(), 0);
-    for(int i = 0; i<searchParams.rootNumSymmetriesToSample; i++) {
-      std::swap(symmetryIndexes[i], symmetryIndexes[thread.rand.nextInt(i,SymmetryHelpers::NUM_SYMMETRIES-1)]);
+    int numSymmetries = SymmetryHelpers::numSymmetries(thread.board.shape);
+    int numSamples = std::min(searchParams.rootNumSymmetriesToSample, numSymmetries);
+    for(int i = 0; i<numSamples; i++) {
+      std::swap(symmetryIndexes[i], symmetryIndexes[thread.rand.nextInt(i,numSymmetries-1)]);
       nnInputParams.symmetry = symmetryIndexes[i];
       bool skipCacheThisIteration = true; //Skip cache since there's no guarantee which symmetry is in the cache
       nnEvaluator->evaluate(

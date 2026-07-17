@@ -27,6 +27,8 @@ struct InitialPosition {
 
 
 struct OtherGameProperties {
+  // A caller-supplied match opening is complete, including an empty prefix.
+  bool hasCompleteOpening = false;
   bool isSgfPos = false;
   bool isHintPos = false;
   bool allowPolicyInit = true;
@@ -104,6 +106,7 @@ class GameInitializer {
   std::vector<int> allowedScoringRules;
   std::vector<int> allowedBSizes;
   std::vector<double> allowedBSizeRelProbs;
+  BoardShape boardShape;
 
   double allowRectangleProb;
 

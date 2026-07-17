@@ -1,0 +1,153 @@
+--- openclbackend.cpp
++++ openclbackend.cpp
+@@ -11,6 +11,7 @@
+ #include "../neuralnet/activations.h"
+ 
+ #include "../neuralnet/openclhelpers.h"
++#include "benty-graph.h"
+ 
+ #include "../core/simpleallocator.h"
+ #include "../core/test.h"
+@@ -2488,6 +2489,7 @@
+   // RoPE data
+   cl_mem ropeCosTable;
+   cl_mem ropeSinTable;
++  cl_mem graphBias = nullptr;
+   int ropeNumPairs;
+ 
+   // Shared attention kernel (not owned by this block)
+@@ -2548,9 +2550,22 @@
+       ropeCosTable = createReadOnlyBuffer(handle, cosTableData, useFP16);
+       ropeSinTable = createReadOnlyBuffer(handle, sinTableData, useFP16);
+     }
++    if(desc->graphAttention) {
++      const auto& geometry = BentYGraph::geometry(nnXLen);
++      auto compactBias = desc->computeGraphBias(nnXLen);
++      int tokens = static_cast<int>(geometry.points.size());
++      vector<float> paddedBias(numHeads*paddedNNXYLen*paddedNNXYLen,0.0f);
++      for(int head = 0; head < numHeads; head++) {
++        for(int query = 0; query < tokens; query++)
++          std::copy_n(compactBias.data()+(head*tokens+query)*tokens,tokens,
++                      paddedBias.data()+(head*paddedNNXYLen+query)*paddedNNXYLen);
++      }
++      graphBias = createReadOnlyBuffer(handle,paddedBias,false);
++    }
+   }
+ 
+   ~TransformerAttentionBlock() {
++    if(graphBias) clReleaseMemObject(graphBias);
+     if(ropeCosTable != NULL)
+       clReleaseMemObject(ropeCosTable);
+     if(ropeSinTable != NULL)
+@@ -2667,6 +2682,9 @@
+       clSetKernelArg(kernel, 6, sizeof(int), (const void *)&numHeads);
+       clSetKernelArg(kernel, 7, sizeof(int), (const void *)&numKVHeads);
+       clSetKernelArg(kernel, 8, sizeof(float), (const void *)&scale);
++      int hasGraphBias = graphBias != nullptr;
++      clSetKernelArg(kernel, 9, sizeof(cl_mem), &graphBias);
++      clSetKernelArg(kernel, 10, sizeof(int), &hasGraphBias);
+ 
+       cl_int err;
+       if(attnKernels->useTiled) {
+@@ -2857,24 +2875,36 @@
+ {
+   testAssert(descBlocks.size() == numBlocks);
+   fullLen = handle->paddedNNXYLen;
+-  if(handle->computeContext->packY && !useFP16 && !descBlocks.empty() && descBlocks[0].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
+-    packedLen = nnXLen * (nnXLen + 1) / 2;
++  bool graphAttention = !descBlocks.empty() && descBlocks[0].first == TRANSFORMER_ATTENTION_BLOCK_KIND &&
++    static_cast<const TransformerAttentionDesc*>(descBlocks[0].second.get())->graphAttention;
++  if(graphAttention || (handle->computeContext->packY && !useFP16 && !descBlocks.empty() &&
++                       descBlocks[0].first == TRANSFORMER_ATTENTION_BLOCK_KIND)) {
+     vector<int> gather, scatter(fullLen,-1);
+-    for(int y=0;y<nnYLen;y++) for(int x=0;x<nnXLen-y;x++) {
+-      scatter[y*nnXLen+x] = gather.size();
+-      gather.push_back(y*nnXLen+x);
+-    }
++    if(graphAttention)
++      gather = BentYGraph::geometry(nnXLen).points;
++    else {
++      for(int y=0;y<nnYLen;y++) for(int x=0;x<nnXLen-y;x++)
++        gather.push_back(y*nnXLen+x);
++    }
++    for(int i = 0; i < static_cast<int>(gather.size()); i++)
++      scatter[gather[i]] = i;
++    packedLen = handle->tuneParams.getPaddedNNXYLen(static_cast<int>(gather.size()),1,
++                                                  handle->usingFP16TensorCoresFor1x1);
++    gather.resize(packedLen,-1);
+     cl_int err;
+     gatherMap = clCreateBuffer(handle->clContext,CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,gather.size()*sizeof(int),gather.data(),&err); CHECK_ERR(err);
+     scatterMap = clCreateBuffer(handle->clContext,CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,scatter.size()*sizeof(int),scatter.data(),&err); CHECK_ERR(err);
+-    const char* source = R"CLC(
+-      __kernel void remap(__global const float* a, __global float* b, __global const int* map, int fromLen, int toLen) {
++    string remapSource = OpenCLKernels::common + R"CLC(
++      __kernel void remap(__global const realstore* a, __global realstore* b, __global const int* map, int fromLen, int toLen) {
+         int i=get_global_id(0), j=map[i%toLen];
+-        b[i]=j<0?0.0f:a[(i/toLen)*fromLen+j];
++        real value = j<0 ? ZERO : LOAD(a,(i/toLen)*fromLen+j);
++        STORE(b,i,value);
+       }
+     )CLC";
++    const char* source = remapSource.c_str();
+     cl_program prog=clCreateProgramWithSource(handle->clContext,1,&source,nullptr,&err); CHECK_ERR(err);
+-    err=clBuildProgram(prog,1,&handle->deviceId,"",nullptr,nullptr); CHECK_ERR(err);
++    string remapOptions = handle->getFP16CompileOptions();
++    err=clBuildProgram(prog,1,&handle->deviceId,remapOptions.c_str(),nullptr,nullptr); CHECK_ERR(err);
+     remapKernel=clCreateKernel(prog,"remap",&err); CHECK_ERR(err);
+     clReleaseProgram(prog);
+     handle->paddedNNXYLen=packedLen;
+--- openclkernels.cpp
++++ openclkernels.cpp
+@@ -1397,7 +1397,9 @@
+   int seqLen,
+   int numHeads,
+   int numKVHeads,
+-  float scale                  // 1/sqrt(headDim)
++  float scale,                 // 1/sqrt(headDim)
++  __global const float* graphBias,
++  int hasGraphBias
+ ) {
+   const int localIdx = get_local_id(0);   // 0..ATTN_BLOCK_Q-1
+   const int qBlockStart = get_group_id(0) * (ATTN_BLOCK_Q * Q_PER_THREAD);
+@@ -1492,6 +1494,8 @@
+             dot += q[qi * ATTN_HEAD_DIM + d] * kTile[tileK * ATTN_HEAD_DIM + d];
+           }
+           dot *= scale;
++          if(hasGraphBias)
++            dot += graphBias[(h*seqLen+qPos)*seqLen+kvStart+tileK];
+ 
+           // Online softmax update
+           float newMax = fmax(runningMax[qi], dot);
+@@ -1562,7 +1566,9 @@
+   int seqLen,
+   int numHeads,
+   int numKVHeads,
+-  float scale                  // 1/sqrt(headDim)
++  float scale,                 // 1/sqrt(headDim)
++  __global const float* graphBias,
++  int hasGraphBias
+ ) {
+   const int qPos = get_global_id(0);
+   const int bh = get_global_id(1);  // batch * numHeads + head
+@@ -1609,6 +1615,8 @@
+       dot += q[d] * kVal;
+     }
+     dot *= scale;
++    if(hasGraphBias)
++      dot += graphBias[(h*seqLen+qPos)*seqLen+kPos];
+ 
+     // Online softmax update
+     float newMax = fmax(runningMax, dot);
+--- opencltuner.cpp
++++ opencltuner.cpp
+@@ -3196,6 +3196,10 @@
+       clSetKernelArg(kernel, 6, sizeof(int), (void*)&numHeads);
+       clSetKernelArg(kernel, 7, sizeof(int), (void*)&numKVHeads);
+       clSetKernelArg(kernel, 8, sizeof(float), (void*)&scale);
++      cl_mem graphBias = nullptr;
++      int hasGraphBias = 0;
++      clSetKernelArg(kernel, 9, sizeof(cl_mem), &graphBias);
++      clSetKernelArg(kernel, 10, sizeof(int), &hasGraphBias);
+ 
+       cl_event event;
+       if(cfg.transformer.USE_TILED_ATTN) {

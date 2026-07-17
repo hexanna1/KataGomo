@@ -19,7 +19,7 @@ import torch.nn
 from torch.optim.swa_utils import AveragedModel
 
 import modelconfigs
-from model_pytorch import Model, ResBlock, NestedBottleneckResBlock
+from model_pytorch import Model, ResBlock
 from load_model import load_model
 
 #Command and args-------------------------------------------------------------------
@@ -34,15 +34,12 @@ parser.add_argument('-export-dir', help='model file dir to save to', required=Tr
 parser.add_argument('-model-name', help='name to record in model file', required=True)
 parser.add_argument('-filename-prefix', help='filename prefix to save to within dir', required=True)
 parser.add_argument('-use-swa', help='Use SWA model', action="store_true", required=False)
-args = vars(parser.parse_args())
 
 
-def main(args):
-    checkpoint_file = args["checkpoint"]
+def export_model(model, swa_model, other_state_dict, args):
     export_dir = args["export_dir"]
     model_name = args["model_name"]
     filename_prefix = args["filename_prefix"]
-    use_swa = args["use_swa"]
 
     os.makedirs(export_dir,exist_ok=True)
 
@@ -59,8 +56,6 @@ def main(args):
 
     logging.info(str(sys.argv))
 
-    # LOAD MODEL ---------------------------------------------------------------------
-    model, swa_model, other_state_dict = load_model(checkpoint_file, use_swa, device="cpu", verbose=True)
     model_config = model.config
 
     # WRITING MODEL ----------------------------------------------------------------
@@ -72,9 +67,9 @@ def main(args):
     def writestr(s):
         f.write(s.encode(encoding="ascii",errors="backslashreplace"))
 
-    # Ignore what's in the config if less than 11 since a lot of testing models
-    # are on old version but actually have various new architectures.
-    version = max(model_config["version"],11)
+    # Spatial normalization is encoded by the native trunk descriptor.
+    spatial_rmsnorm = model_config.get("trunk_final_rmsnorm", False) and model_config.get("trunk_rmsnorm_spatial", False)
+    version = 17 if spatial_rmsnorm else max(model_config["version"],11)
 
     writeln(model_name)
     writeln(version)
@@ -163,11 +158,16 @@ def main(args):
             assert not normmask.is_using_batchnorm
             write_weights((1.0-epsilon) * torch.ones(normmask.c_in, dtype=torch.float))
 
+        # Gamma can be parameterized as an offset from unit scale.
+        gamma = normmask.gamma
+        if gamma is not None and getattr(normmask, "gamma_weight_decay_center_1", False):
+            gamma = gamma + 1.0
+
         if normmask.scale is not None:
             if normmask.gamma is not None:
                 assert normmask.gamma.shape == (1, normmask.c_in, 1, 1)
                 assert has_gamma_or_scale
-                write_weights(normmask.scale * normmask.gamma)
+                write_weights(normmask.scale * gamma)
             else:
                 assert has_gamma_or_scale
                 write_weights(normmask.scale * torch.ones(normmask.c_in, dtype=torch.float, device="cpu"))
@@ -175,7 +175,7 @@ def main(args):
             if normmask.gamma is not None:
                 assert normmask.gamma.shape == (1, normmask.c_in, 1, 1)
                 assert has_gamma_or_scale
-                write_weights(normmask.gamma)
+                write_weights(gamma)
             else:
                 assert not has_gamma_or_scale
                 pass
@@ -203,12 +203,23 @@ def main(args):
         assert biasmask.beta.shape == (1, biasmask.c_in, 1, 1)
         write_weights(biasmask.beta)
 
+    def write_spatial_rmsnorm(name, norm):
+        writeln(name)
+        writeln(norm.c_in)
+        writeln(norm.eps)
+        writeln(1)
+        writeln(0)
+        write_weights(norm.gamma)
+        write_weights(norm.beta)
+
     def write_activation(name, activation):
         writeln(name)
         if isinstance(activation,torch.nn.ReLU):
             writeln("ACTIVATION_RELU")
         elif isinstance(activation,torch.nn.Mish):
             writeln("ACTIVATION_MISH")
+        elif isinstance(activation,torch.nn.SiLU):
+            writeln("ACTIVATION_SILU")
         elif isinstance(activation,torch.nn.Identity):
             writeln("ACTIVATION_IDENTITY")
         else:
@@ -262,7 +273,48 @@ def main(args):
             write_matmul(name+".convpool.linear_g", normactconv.convpool.linear_g.weight)
             assert normactconv.convpool.linear_g.bias is None
 
+    def write_transformer_norm(name, norm):
+        writeln(name)
+        writeln(norm.weight.shape[0])
+        writeln(norm.eps)
+        write_weights(norm.weight)
+
+    def write_attention(name, block):
+        graph_attention = hasattr(block, "graph_bias_input")
+        writeln("transformer_graph_attention_block" if graph_attention else "transformer_attention_block")
+        writeln(name)
+        for value in [block.num_heads, block.num_kv_heads, block.q_head_dim, block.v_head_dim,
+                      0 if graph_attention else 1, 0 if graph_attention else 1]:
+            writeln(value)
+        write_transformer_norm(name+".norm1", block.norm1)
+        for key in ["q_proj", "k_proj", "v_proj", "out_proj"]:
+            write_matmul(name+"."+key, getattr(block, key).weight)
+        if graph_attention:
+            write_matmul(name+".graph_bias_input", block.graph_bias_input.weight)
+            write_matmul(name+".graph_bias_output", block.graph_bias_output.weight)
+        else:
+            writeln(name+".rope_freqs")
+            for value in block.rope_freqs.shape:
+                writeln(value)
+            write_weights(block.rope_freqs)
+
+    def write_ffn(name, block):
+        writeln("transformer_ffn_block")
+        writeln(name)
+        for value in [block.c_main, block.ffn_dim, 1]:
+            writeln(value)
+        write_transformer_norm(name+".norm", block.norm)
+        for key in ["ffn_linear1", "ffn_linear_gate", "ffn_linear2"]:
+            write_matmul(name+"."+key, getattr(block, key).weight)
+
     def write_block(name,block):
+        if hasattr(block, "q_proj"):
+            write_attention(name, block)
+            return
+        if hasattr(block, "ffn_linear1"):
+            write_ffn(name, block)
+            return
+
         if isinstance(block,ResBlock) and block.normactconv1.c_gpool is None:
             assert block.normactconv2.c_gpool is None
             writeln("ordinary_block")
@@ -275,11 +327,10 @@ def main(args):
             writeln(name)
             write_normactconv(name+".normactconv1", block.normactconv1)
             write_normactconv(name+".normactconv2", block.normactconv2)
-        elif isinstance(block,NestedBottleneckResBlock):
+        elif hasattr(block, "blockstack") and hasattr(block, "normactconvp"):
             writeln("nested_bottleneck_block")
             writeln(name)
-            writeln(block.internal_length)
-            assert block.internal_length == len(block.blockstack)
+            writeln(len(block.blockstack))
             write_normactconv(name+".normactconvp", block.normactconvp)
             for i,subblock in enumerate(block.blockstack):
                 write_block(name+".blockstack."+str(i),subblock)
@@ -296,8 +347,8 @@ def main(args):
         writeln(model.c_gpool)
         writeln(model.c_gpool)
         if version >= 15 and not(version >= 101 and version <= 199):
-            # Write some dummy placeholders for future features
-            writeln(0)
+            # Trunk normalization kind followed by unused descriptor options.
+            writeln(1 if spatial_rmsnorm else 0)
             writeln(0)
             writeln(0)
             writeln(0)
@@ -310,7 +361,9 @@ def main(args):
 
         for i,block in enumerate(model.blocks):
             write_block("model.blocks."+str(i), block)
-        if model.trunk_normless:
+        if spatial_rmsnorm:
+            write_spatial_rmsnorm("model.norm_trunkfinal", model.norm_trunkfinal)
+        elif model.trunk_normless:
             write_biasmask("model.norm_trunkfinal", model.norm_trunkfinal)
         else:
             write_bn("model.norm_trunkfinal", model.norm_trunkfinal)
@@ -318,6 +371,11 @@ def main(args):
 
     def write_policy_head(name,policyhead):
         writeln(name)
+        if spatial_rmsnorm:
+            writeln(2)
+            writeln(0)
+            writeln(0)
+            writeln(0)
         write_conv(name+".conv1p", policyhead.conv1p)
         write_conv(name+".conv1g", policyhead.conv1g)
         write_biasmask(name+".biasg", policyhead.biasg)
@@ -327,8 +385,20 @@ def main(args):
         write_biasmask(name+".bias2", policyhead.bias2)
         write_activation(name+".act2", policyhead.act2)
 
-        # Write the this-move prediction and the optimistic policy prediction
-        if version <= 11 or (version >= 101 and version <= 199):
+        # Write the native policy output channels.
+        if spatial_rmsnorm:
+            regular = policyhead.conv2p.weight[0]
+            write_conv_weight(name+".conv2p", torch.stack((regular, regular), dim=0))
+            # Factor the linear pass prediction through the policy head's hidden width.
+            pass_projection = torch.zeros_like(policyhead.linear_g.weight)
+            pass_projection[0] = policyhead.linear_pass.weight[0]
+            pass_readout = pass_projection.new_zeros((2, pass_projection.shape[0]))
+            pass_readout[:,0] = 1.0
+            write_matmul(name+".linear_pass", pass_projection)
+            write_matbias(name+".linear_pass_bias", pass_projection.new_zeros(pass_projection.shape[0]))
+            write_activation(name+".act_pass", torch.nn.Identity())
+            write_matmul(name+".linear_pass2", pass_readout)
+        elif version <= 11 or (version >= 101 and version <= 199):
             assert policyhead.conv2p.weight.shape[0] == 4
             write_conv_weight(name+".conv2p", torch.stack((policyhead.conv2p.weight[0],), dim=0))
             assert policyhead.linear_pass.weight.shape[0] == 4
@@ -355,6 +425,10 @@ def main(args):
 
     def write_value_head(name, valuehead):
         writeln(name)
+        if spatial_rmsnorm:
+            writeln(0)
+            writeln(0)
+            writeln(0)
         write_conv(name+".conv1", valuehead.conv1)
         write_biasmask(name+".bias1", valuehead.bias1)
         write_activation(name+".act1", valuehead.act1)
@@ -419,4 +493,6 @@ def main(args):
 
 
 if __name__ == "__main__":
-    main(args)
+    args = vars(parser.parse_args())
+    model, swa_model, state = load_model(args["checkpoint"], args["use_swa"], device="cpu", verbose=True)
+    export_model(model, swa_model, state, args)

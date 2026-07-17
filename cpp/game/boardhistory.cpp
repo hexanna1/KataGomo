@@ -15,6 +15,7 @@ BoardHistory::BoardHistory()
    recentBoards(),
    currentRecentBoardIdx(0),
    presumedNextMovePla(P_BLACK),
+   passIsLoss(true),
    isGameFinished(false),winner(C_EMPTY),
    isNoResult(false),isResignation(false)
 {
@@ -32,6 +33,7 @@ BoardHistory::BoardHistory(const Board& board, Player pla, const Rules& r)
    recentBoards(),
    currentRecentBoardIdx(0),
    presumedNextMovePla(pla),
+   passIsLoss(true),
    isGameFinished(false),winner(C_EMPTY),
    isNoResult(false),isResignation(false)
 {
@@ -48,6 +50,7 @@ BoardHistory::BoardHistory(const BoardHistory& other)
    recentBoards(),
    currentRecentBoardIdx(other.currentRecentBoardIdx),
    presumedNextMovePla(other.presumedNextMovePla),
+   passIsLoss(other.passIsLoss),
    isGameFinished(other.isGameFinished),winner(other.winner),
    isNoResult(other.isNoResult),isResignation(other.isResignation)
 {
@@ -67,6 +70,7 @@ BoardHistory& BoardHistory::operator=(const BoardHistory& other)
   std::copy(other.recentBoards, other.recentBoards+NUM_RECENT_BOARDS, recentBoards);
   currentRecentBoardIdx = other.currentRecentBoardIdx;
   presumedNextMovePla = other.presumedNextMovePla;
+  passIsLoss = other.passIsLoss;
   isGameFinished = other.isGameFinished;
   winner = other.winner;
   isNoResult = other.isNoResult;
@@ -84,6 +88,7 @@ BoardHistory::BoardHistory(BoardHistory&& other) noexcept
   recentBoards(),
   currentRecentBoardIdx(other.currentRecentBoardIdx),
   presumedNextMovePla(other.presumedNextMovePla),
+  passIsLoss(other.passIsLoss),
   isGameFinished(other.isGameFinished),winner(other.winner),
   isNoResult(other.isNoResult),isResignation(other.isResignation)
 {
@@ -100,6 +105,7 @@ BoardHistory& BoardHistory::operator=(BoardHistory&& other) noexcept
   std::copy(other.recentBoards, other.recentBoards+NUM_RECENT_BOARDS, recentBoards);
   currentRecentBoardIdx = other.currentRecentBoardIdx;
   presumedNextMovePla = other.presumedNextMovePla;
+  passIsLoss = other.passIsLoss;
   isGameFinished = other.isGameFinished;
   winner = other.winner;
   isNoResult = other.isNoResult;
@@ -135,11 +141,16 @@ void BoardHistory::clear(const Board& board, Player pla, const Rules& r) {
 BoardHistory BoardHistory::copyToInitial() const {
   BoardHistory hist(initialBoard, initialPla, rules);
   hist.setInitialTurnNumber(initialTurnNumber);
+  hist.setPassIsLoss(passIsLoss);
   return hist;
 }
 
 void BoardHistory::setInitialTurnNumber(int n) {
   initialTurnNumber = n;
+}
+
+void BoardHistory::setPassIsLoss(bool b) {
+  passIsLoss = b;
 }
 
 void BoardHistory::printBasicInfo(ostream& out, const Board& board) const {
@@ -200,7 +211,7 @@ bool BoardHistory::isLegalTolerant(const Board& board, Loc moveLoc, Player moveP
   return board.isLegal(moveLoc, movePla);
 }
 bool BoardHistory::makeBoardMoveTolerant(Board& board, Loc moveLoc, Player movePla) {
-  if(!board.isLegal(moveLoc,movePla))
+  if(!isLegalTolerant(board,moveLoc,movePla))
     return false;
   makeBoardMoveAssumeLegal(board,moveLoc,movePla);
   return true;
@@ -241,7 +252,7 @@ Hash128 BoardHistory::getSituationRulesHash(const Board& board, const BoardHisto
   Hash128 hash = board.pos_hash;
   hash ^= Board::ZOBRIST_PLAYER_HASH[nextPlayer];
 
-  //Fold in the ko, scoring, and suicide rules
+  //Fold in the scoring rule and move limit
   hash ^= Rules::ZOBRIST_SCORING_RULE_HASH[hist.rules.scoringRule];
   hash ^= Hash128(
     Hash::murmurMix(Rules::ZOBRIST_MAXMOVES_HASH_BASE.hash0 ^ hist.rules.maxMoves),
@@ -256,5 +267,3 @@ Hash128 BoardHistory::getSituationRulesHash(const Board& board, const BoardHisto
 
   return hash;
 }
-
-

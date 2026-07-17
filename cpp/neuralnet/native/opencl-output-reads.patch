@@ -1,0 +1,41 @@
+--- openclbackend.cpp
++++ openclbackend.cpp
+@@ -4210,7 +4210,8 @@
+     buffers->convWorkspace2
+   );
+ 
+-  cl_bool blocking = CL_TRUE;
++  // Queue result reads together; the final ownership read waits for all of them.
++  cl_bool blocking = CL_FALSE;
+   err = clEnqueueReadBuffer(
+     handle->commandQueue, buffers->policyPass, blocking, 0,
+     inputBuffers->singlePolicyPassResultElts*sizeof(float)*batchSize, inputBuffers->policyPassResults, 0, NULL, NULL
+@@ -4220,8 +4221,9 @@
+   // Read back policy (spatial) - GPU buffer is padded, need to unpad
+   size_t paddedPolicyElts = (size_t)numPolicyChannels * paddedNNXYLen * batchSize;
+   if(useFP16Storage) {
++    // Half-to-float conversion below needs the policy read to finish first.
+     err = clEnqueueReadBuffer(
+-      handle->commandQueue, buffers->policy, blocking, 0,
++      handle->commandQueue, buffers->policy, CL_TRUE, 0,
+       paddedPolicyElts * sizeof(half_t), inputBuffers->policyResultsHalf, 0, NULL, NULL
+     );
+     CHECK_ERR(err);
+@@ -4265,7 +4267,7 @@
+   size_t paddedOwnershipElts = (size_t)gpuHandle->model->numOwnershipChannels * paddedNNXYLen * batchSize;
+   if(useFP16Storage) {
+     err = clEnqueueReadBuffer(
+-      handle->commandQueue, buffers->ownership, blocking, 0,
++      handle->commandQueue, buffers->ownership, CL_TRUE, 0,
+       paddedOwnershipElts * sizeof(half_t), inputBuffers->ownershipResultsHalf, 0, NULL, NULL
+     );
+     CHECK_ERR(err);
+@@ -4283,7 +4285,7 @@
+   else {
+     if(paddedNNXYLen == nnXYLen) {
+       err = clEnqueueReadBuffer(
+-        handle->commandQueue, buffers->ownership, blocking, 0,
++        handle->commandQueue, buffers->ownership, CL_TRUE, 0,
+         inputBuffers->singleOwnershipResultElts*sizeof(float)*batchSize, inputBuffers->ownershipResults, 0, NULL, NULL
+       );
+       CHECK_ERR(err);

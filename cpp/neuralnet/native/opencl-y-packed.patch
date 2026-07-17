@@ -1,0 +1,147 @@
+--- openclbackend.cpp
++++ openclbackend.cpp
+@@ -395,6 +395,7 @@
+ //---------------------------------------------------------------------------------------------------------
+ 
+ struct ComputeContext {
++  bool packY = false;
+   const int nnXLen;
+   const int nnYLen;
+   const enabled_t usingFP16Mode;
+@@ -541,7 +542,9 @@
+       full
+     );
+   };
+-  return new ComputeContext(gpuIdxs,logger,nnXLen,nnYLen,useFP16Mode,getParamsForDeviceName);
++  auto* context = new ComputeContext(gpuIdxs,logger,nnXLen,nnYLen,useFP16Mode,getParamsForDeviceName);
++  context->packY = cfg.contains("packY") && cfg.getBool("packY");
++  return context;
+ }
+ 
+ void NeuralNet::freeComputeContext(ComputeContext* computeContext) {
+@@ -1909,6 +1912,22 @@
+   const int nnXLen;
+   const int nnYLen;
+   vector<pair<int,unique_ptr_void>> blocks;
++  int fullLen = 0, packedLen = 0;
++  mutable std::unique_ptr<ScratchBuffers> packedBuffers;
++  mutable int packedBatchCapacity = 0;
++  cl_kernel remapKernel = nullptr;
++  cl_mem gatherMap = nullptr, scatterMap = nullptr;
++  void remap(ComputeHandleInternal* handle, cl_mem input, cl_mem output, cl_mem mapping,
++             int fromLen, int toLen, int planes) const {
++    clSetKernelArg(remapKernel,0,sizeof(cl_mem),&input);
++    clSetKernelArg(remapKernel,1,sizeof(cl_mem),&output);
++    clSetKernelArg(remapKernel,2,sizeof(cl_mem),&mapping);
++    clSetKernelArg(remapKernel,3,sizeof(int),&fromLen);
++    clSetKernelArg(remapKernel,4,sizeof(int),&toLen);
++    size_t n = (size_t)toLen * planes;
++    cl_int err = clEnqueueNDRangeKernel(handle->commandQueue,remapKernel,1,nullptr,&n,nullptr,0,nullptr,nullptr);
++    CHECK_ERR(err);
++  }
+ 
+   BlockStack() = delete;
+   BlockStack(const BlockStack&) = delete;
+@@ -2507,7 +2526,23 @@
+ 
+       vector<float> cosTableData;
+       vector<float> sinTableData;
+-      desc->computeRopeCosSin(nnXLen, nnYLen, paddedNNXYLen, cosTableData, sinTableData);
++      if(paddedNNXYLen < nnXLen * nnYLen) {
++        vector<float> fullCos, fullSin;
++        int full = nnXLen*nnYLen;
++        desc->computeRopeCosSin(nnXLen,nnYLen,full,fullCos,fullSin);
++        int groups = fullCos.size()/full;
++        cosTableData.resize(groups*paddedNNXYLen);
++        sinTableData.resize(groups*paddedNNXYLen);
++        for(int g=0;g<groups;g++) {
++          int j=0;
++          for(int y=0;y<nnYLen;y++) for(int x=0;x<nnXLen-y;x++,j++) {
++            cosTableData[g*paddedNNXYLen+j]=fullCos[g*full+y*nnXLen+x];
++            sinTableData[g*paddedNNXYLen+j]=fullSin[g*full+y*nnXLen+x];
++          }
++        }
++      } else {
++        desc->computeRopeCosSin(nnXLen, nnYLen, paddedNNXYLen, cosTableData, sinTableData);
++      }
+ 
+       bool useFP16 = false;
+       ropeCosTable = createReadOnlyBuffer(handle, cosTableData, useFP16);
+@@ -2821,6 +2856,30 @@
+   nnYLen(nnY)
+ {
+   testAssert(descBlocks.size() == numBlocks);
++  fullLen = handle->paddedNNXYLen;
++  if(handle->computeContext->packY && !useFP16 && !descBlocks.empty() && descBlocks[0].first == TRANSFORMER_ATTENTION_BLOCK_KIND) {
++    packedLen = nnXLen * (nnXLen + 1) / 2;
++    vector<int> gather, scatter(fullLen,-1);
++    for(int y=0;y<nnYLen;y++) for(int x=0;x<nnXLen-y;x++) {
++      scatter[y*nnXLen+x] = gather.size();
++      gather.push_back(y*nnXLen+x);
++    }
++    cl_int err;
++    gatherMap = clCreateBuffer(handle->clContext,CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,gather.size()*sizeof(int),gather.data(),&err); CHECK_ERR(err);
++    scatterMap = clCreateBuffer(handle->clContext,CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,scatter.size()*sizeof(int),scatter.data(),&err); CHECK_ERR(err);
++    const char* source = R"CLC(
++      __kernel void remap(__global const float* a, __global float* b, __global const int* map, int fromLen, int toLen) {
++        int i=get_global_id(0), j=map[i%toLen];
++        b[i]=j<0?0.0f:a[(i/toLen)*fromLen+j];
++      }
++    )CLC";
++    cl_program prog=clCreateProgramWithSource(handle->clContext,1,&source,nullptr,&err); CHECK_ERR(err);
++    err=clBuildProgram(prog,1,&handle->deviceId,"",nullptr,nullptr); CHECK_ERR(err);
++    remapKernel=clCreateKernel(prog,"remap",&err); CHECK_ERR(err);
++    clReleaseProgram(prog);
++    handle->paddedNNXYLen=packedLen;
++  }
++
+   for(int i = 0; i<numBlocks; i++) {
+     if(descBlocks[i].first == ORDINARY_BLOCK_KIND) {
+       ResidualBlockDesc* blockDesc = (ResidualBlockDesc*)descBlocks[i].second.get();
+@@ -2879,9 +2938,13 @@
+       ASSERT_UNREACHABLE;
+     }
+   }
++  handle->paddedNNXYLen=fullLen;
+ }
+ 
+ BlockStack::~BlockStack() {
++  if(remapKernel) clReleaseKernel(remapKernel);
++  if(gatherMap) clReleaseMemObject(gatherMap);
++  if(scatterMap) clReleaseMemObject(scatterMap);
+ }
+ 
+ ConvWorkspaceEltsNeeded BlockStack::requiredConvWorkspaceElts(ComputeHandleInternal* handle, size_t maxBatchSize) const {
+@@ -2926,6 +2989,24 @@
+   cl_mem convWorkspace,
+   cl_mem convWorkspace2
+ ) const {
++  cl_mem originalTrunk=trunk;
++  std::unique_ptr<SizedBuf<cl_mem>> packed, packedScratch, packedMask;
++  if(packedLen) {
++    if(batchSize > packedBatchCapacity) {
++      int spatialLen = handle->paddedNNXYLen;
++      handle->paddedNNXYLen = packedLen;
++      packedBuffers = std::make_unique<ScratchBuffers>(handle,batchSize);
++      handle->paddedNNXYLen = spatialLen;
++      packedBatchCapacity = batchSize;
++    }
++    scratch = packedBuffers.get();
++    packed=std::make_unique<SizedBuf<cl_mem>>(scratch->allocator,scratch->getBufSizeXY(trunkNumChannels));
++    packedScratch=std::make_unique<SizedBuf<cl_mem>>(scratch->allocator,scratch->getBufSizeXY(trunkNumChannels));
++    packedMask=std::make_unique<SizedBuf<cl_mem>>(scratch->allocator,scratch->getBufSizeXY(1));
++    remap(handle,trunk,packed->buf,gatherMap,fullLen,packedLen,batchSize*trunkNumChannels);
++    remap(handle,mask,packedMask->buf,gatherMap,fullLen,packedLen,batchSize);
++    trunk=packed->buf; trunkScratch=packedScratch->buf; mask=packedMask->buf;
++  }
+   for(int i = 0; i<blocks.size(); i++) {
+ #ifdef DEBUG_INTERMEDIATE_VALUES
+     debugPrint3D("OPENCL Blockstack block " + Global::intToString(i), handle, trunk, batchSize, trunkNumChannels, mask);
+@@ -2985,6 +3066,7 @@
+     }
+ 
+   }
++  if(packedLen) remap(handle,trunk,originalTrunk,scatterMap,packedLen,fullLen,batchSize*trunkNumChannels);
+ }
+ 
+ //--------------------------------------------------------------

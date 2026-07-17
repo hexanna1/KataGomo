@@ -119,7 +119,7 @@ void BookHash::getHashAndSymmetry(const BoardHistory& hist, BookHash& hashRet, i
   // Don't consider symmetries that change the lengths of x and y.
   // This also lets us be fairly lazy in the rest of the book implementation and not have to carefully consider every case whether
   // we need to swap xSize and ySize when passing into getSymLoc.
-  int numSymmetries = SymmetryHelpers::NUM_SYMMETRIES;
+  int numSymmetries = SymmetryHelpers::numSymmetries(hist.initialBoard.shape);
 
   for(int symmetry = 0; symmetry < numSymmetries; symmetry++) {
     boardsBySym[symmetry] = SymmetryHelpers::getSymBoard(hist.initialBoard,symmetry);
@@ -186,7 +186,7 @@ void BookHash::getHashAndSymmetry(const BoardHistory& hist, BookHash& hashRet, i
   // Find all symmetries that preserve the smallestHash.
   symmetriesRet.clear();
   for(int symmetry = 0; symmetry < numSymmetries; symmetry++) {
-    if(hashes[SymmetryHelpers::compose(smallestSymmetry,symmetry)] == smallestHash)
+    if(hashes[SymmetryHelpers::compose(smallestSymmetry,symmetry,hist.initialBoard.shape)] == smallestHash)
       symmetriesRet.push_back(symmetry);
   }
 }
@@ -215,14 +215,14 @@ BookMove::BookMove(Loc mv, int s, BookHash h, double rp)
    biggestWLCostFromRoot(0.0)
 {}
 
-BookMove BookMove::getSymBookMove(int symmetry, int xSize, int ySize) {
+BookMove BookMove::getSymBookMove(int symmetry, int xSize, int ySize, BoardShape shape) {
   BookMove ret(
-    SymmetryHelpers::getSymLoc(move,xSize,ySize,symmetry),
+    SymmetryHelpers::getSymLoc(move,xSize,ySize,shape,symmetry),
     // This needs to be the symmetry that transform's retspace -> childspace
     // symmetry is the transform from orig -> ret
     // symmetryToAlign is the transform from orig -> child.
     // Therefore invert(symmetry) + symmetryToAlign is correct.
-    SymmetryHelpers::compose(SymmetryHelpers::invert(symmetry),symmetryToAlign),
+    SymmetryHelpers::compose(SymmetryHelpers::invert(symmetry,shape),symmetryToAlign,shape),
     hash,
     rawPolicy
   );
@@ -278,12 +278,12 @@ ConstSymBookNode::ConstSymBookNode(std::nullptr_t)
 SymBookNode::SymBookNode(BookNode* n, int s)
   :node(n),
    symmetryOfNode(s),
-   invSymmetryOfNode(SymmetryHelpers::invert(s))
+   invSymmetryOfNode(SymmetryHelpers::invert(s,n ? n->book->initialBoard.shape : Board::DEFAULT_SHAPE))
 {}
 ConstSymBookNode::ConstSymBookNode(const BookNode* n, int s)
   :node(n),
    symmetryOfNode(s),
-   invSymmetryOfNode(SymmetryHelpers::invert(s))
+   invSymmetryOfNode(SymmetryHelpers::invert(s,n ? n->book->initialBoard.shape : Board::DEFAULT_SHAPE))
 {}
 ConstSymBookNode::ConstSymBookNode(const SymBookNode& other)
   :node(other.node),
@@ -308,10 +308,10 @@ SymBookNode SymBookNode::applySymmetry(int symmetry) {
   // symmetry is the map from thisspace -> retspace
   // symmetryOfNode is the map from nodespace -> thisspace
   // The constructor will want the map from nodespace -> retspace
-  return SymBookNode(node,SymmetryHelpers::compose(symmetryOfNode,symmetry));
+  return SymBookNode(node,SymmetryHelpers::compose(symmetryOfNode,symmetry,node->book->initialBoard.shape));
 }
 ConstSymBookNode ConstSymBookNode::applySymmetry(int symmetry) {
-  return ConstSymBookNode(node,SymmetryHelpers::compose(symmetryOfNode,symmetry));
+  return ConstSymBookNode(node,SymmetryHelpers::compose(symmetryOfNode,symmetry,node->book->initialBoard.shape));
 }
 
 Player SymBookNode::pla() {
@@ -331,13 +331,13 @@ BookHash ConstSymBookNode::hash() {
 vector<int> SymBookNode::getSymmetries() {
   vector<int> symmetries;
   for(int symmetry: node->symmetries)
-    symmetries.push_back(SymmetryHelpers::compose(invSymmetryOfNode, symmetry, symmetryOfNode));
+    symmetries.push_back(SymmetryHelpers::compose(invSymmetryOfNode, symmetry, symmetryOfNode,node->book->initialBoard.shape));
   return symmetries;
 }
 vector<int> ConstSymBookNode::getSymmetries() {
   vector<int> symmetries;
   for(int symmetry: node->symmetries)
-    symmetries.push_back(SymmetryHelpers::compose(invSymmetryOfNode, symmetry, symmetryOfNode));
+    symmetries.push_back(SymmetryHelpers::compose(invSymmetryOfNode, symmetry, symmetryOfNode,node->book->initialBoard.shape));
   return symmetries;
 }
 
@@ -351,7 +351,7 @@ bool ConstSymBookNode::isMoveInBook(Loc move) {
     // invSymmetryOfNode is the map (symbooknodespace -> nodespace)
     // symmetry is the map nodespace -> nodespace that we should look for alternative versions of a move.
     // There is only one way to compose them, which is to left-compose invSymmetryOfNode, so we left-compose it (and not right-compose it).
-    symmetry = SymmetryHelpers::compose(invSymmetryOfNode, symmetry);
+    symmetry = SymmetryHelpers::compose(invSymmetryOfNode, symmetry,node->book->initialBoard.shape);
     if(contains(node->moves, SymmetryHelpers::getSymLoc(move, node->book->initialBoard, symmetry)))
       return true;
   }
@@ -365,7 +365,7 @@ vector<BookMove> ConstSymBookNode::getUniqueMovesInBook() {
   assert(node != nullptr);
   vector<BookMove> ret;
   for(std::pair<Loc,BookMove> kv: node->moves) {
-    ret.push_back(kv.second.getSymBookMove(symmetryOfNode, node->book->initialBoard.x_size, node->book->initialBoard.y_size));
+    ret.push_back(kv.second.getSymBookMove(symmetryOfNode, node->book->initialBoard.x_size, node->book->initialBoard.y_size,node->book->initialBoard.shape));
   }
   return ret;
 }
@@ -428,7 +428,7 @@ SymBookNode SymBookNode::canonicalParent() {
   // moveFromParent.symmetryToAlign is the map parentspace -> nodespace
   // symmetryOfNode is the map nodespace -> displayspace
   // For the constructor, we need the map parentspace -> displayspace
-  return SymBookNode(parent,SymmetryHelpers::compose(moveFromParent.symmetryToAlign,symmetryOfNode));
+  return SymBookNode(parent,SymmetryHelpers::compose(moveFromParent.symmetryToAlign,symmetryOfNode,node->book->initialBoard.shape));
 }
 ConstSymBookNode ConstSymBookNode::canonicalParent() {
   if(node->parents.size() <= 0)
@@ -443,14 +443,14 @@ ConstSymBookNode ConstSymBookNode::canonicalParent() {
   // moveFromParent.symmetryToAlign is the map parentspace -> nodespace
   // symmetryOfNode is the map nodespace -> displayspace
   // For the constructor, we need the map parentspace -> displayspace
-  return ConstSymBookNode(parent,SymmetryHelpers::compose(moveFromParent.symmetryToAlign,symmetryOfNode));
+  return ConstSymBookNode(parent,SymmetryHelpers::compose(moveFromParent.symmetryToAlign,symmetryOfNode,node->book->initialBoard.shape));
 }
 
 SymBookNode SymBookNode::follow(Loc move) {
   assert(node != nullptr);
   for(int symmetry: node->symmetries) {
     // Same logic here, invSymmetryOfNode maps symbooknodespace -> nodespace
-    symmetry = SymmetryHelpers::compose(invSymmetryOfNode, symmetry);
+    symmetry = SymmetryHelpers::compose(invSymmetryOfNode, symmetry,node->book->initialBoard.shape);
     auto iter = node->moves.find(SymmetryHelpers::getSymLoc(move, node->book->initialBoard, symmetry));
     if(iter != node->moves.end()) {
       const BookMove& bookMove = iter->second;
@@ -459,7 +459,7 @@ SymBookNode SymBookNode::follow(Loc move) {
       // symmetryToAlign maps nodespace -> childspace
       // The constructor for this child SymBookNode expects the map childspace -> symbooknodespace
       // So we need to compose and invert.
-      return SymBookNode(child,SymmetryHelpers::invert(SymmetryHelpers::compose(symmetry,bookMove.symmetryToAlign)));
+      return SymBookNode(child,SymmetryHelpers::invert(SymmetryHelpers::compose(symmetry,bookMove.symmetryToAlign,node->book->initialBoard.shape),node->book->initialBoard.shape));
     }
   }
   return SymBookNode(nullptr);
@@ -468,13 +468,13 @@ ConstSymBookNode ConstSymBookNode::follow(Loc move) {
   assert(node != nullptr);
   for(int symmetry: node->symmetries) {
     // Same logic here, invSymmetryOfNode maps symbooknodespace -> nodespace
-    symmetry = SymmetryHelpers::compose(invSymmetryOfNode, symmetry);
+    symmetry = SymmetryHelpers::compose(invSymmetryOfNode, symmetry,node->book->initialBoard.shape);
     auto iter = node->moves.find(SymmetryHelpers::getSymLoc(move, node->book->initialBoard, symmetry));
     if(iter != node->moves.end()) {
       const BookMove& bookMove = iter->second;
       const BookNode* child = node->book->get(bookMove.hash);
       // Same logic here, compose and invert.
-      return ConstSymBookNode(child,SymmetryHelpers::invert(SymmetryHelpers::compose(symmetry,bookMove.symmetryToAlign)));
+      return ConstSymBookNode(child,SymmetryHelpers::invert(SymmetryHelpers::compose(symmetry,bookMove.symmetryToAlign,node->book->initialBoard.shape),node->book->initialBoard.shape));
     }
   }
   return ConstSymBookNode(nullptr);
@@ -511,7 +511,7 @@ SymBookNode SymBookNode::playAndAddMove(Board& board, BoardHistory& hist, Loc mo
   int ySize = node->book->initialBoard.y_size;
 
   // Transform the move into the space of the node
-  Loc symMove = SymmetryHelpers::getSymLoc(move,xSize,ySize,invSymmetryOfNode);
+  Loc symMove = SymmetryHelpers::getSymLoc(move,xSize,ySize,node->book->initialBoard.shape,invSymmetryOfNode);
 
   // Find the symmetry for move that prefers the upper right corner if possible.
   // Maximize x first, then minimize y next
@@ -525,7 +525,7 @@ SymBookNode SymBookNode::playAndAddMove(Board& board, BoardHistory& hist, Loc mo
   for(int symmetry: node->symmetries) {
     if(symmetry == 0)
       continue;
-    Loc symLoc = SymmetryHelpers::getSymLoc(symMove,xSize,ySize,symmetry);
+    Loc symLoc = SymmetryHelpers::getSymLoc(symMove,xSize,ySize,node->book->initialBoard.shape,symmetry);
     int symX = Location::getX(symLoc,xSize);
     int symY = Location::getY(symLoc,xSize);
     int bestX = Location::getX(bestLoc,xSize);
@@ -567,12 +567,12 @@ SymBookNode SymBookNode::playAndAddMove(Board& board, BoardHistory& hist, Loc mo
 
   BookMove newBookMove(
     bestLoc,
-    SymmetryHelpers::compose(SymmetryHelpers::invert(bestSymmetry),symmetryOfNode,symmetryToAlignToChild),
+    SymmetryHelpers::compose(SymmetryHelpers::invert(bestSymmetry,node->book->initialBoard.shape),symmetryOfNode,symmetryToAlignToChild,node->book->initialBoard.shape),
     childHash,
     rawPolicy
   );
   node->moves[bestLoc] = newBookMove;
-  return SymBookNode(child,SymmetryHelpers::invert(symmetryToAlignToChild));
+  return SymBookNode(child,SymmetryHelpers::invert(symmetryToAlignToChild,node->book->initialBoard.shape));
 }
 
 
@@ -605,12 +605,12 @@ bool ConstSymBookNode::getBoardHistoryReachingHere(BoardHistory& ret, vector<Loc
   for(size_t i = 0; i < pathFromRoot.size()-1; i++) {
     auto iter = pathFromRoot[i]->moves.find(movesFromRoot[i]);
     assert(iter != pathFromRoot[i]->moves.end());
-    symmetryAcc = SymmetryHelpers::compose(symmetryAcc,iter->second.symmetryToAlign);
+    symmetryAcc = SymmetryHelpers::compose(symmetryAcc,iter->second.symmetryToAlign,node->book->initialBoard.shape);
   }
   // At the end, we'll need this symmetry to transform it into SymBookNode space.
-  symmetryAcc = SymmetryHelpers::compose(symmetryAcc,symmetryOfNode);
+  symmetryAcc = SymmetryHelpers::compose(symmetryAcc,symmetryOfNode,node->book->initialBoard.shape);
   // Additionally we need to apply the symmetry that maps the book's initial hist into its root node space.
-  symmetryAcc = SymmetryHelpers::compose(node->book->initialSymmetry,symmetryAcc);
+  symmetryAcc = SymmetryHelpers::compose(node->book->initialSymmetry,symmetryAcc,node->book->initialBoard.shape);
 
   // symmetryAcc is the map from initialSpace to desired final histSpace
   // Start out with a board permuted with this symmetry so that the initial stones all end up in the right orientation
@@ -622,7 +622,7 @@ bool ConstSymBookNode::getBoardHistoryReachingHere(BoardHistory& ret, vector<Loc
   // symmetryAcc is the map from initialSpace -> histSpace
   // initialSymmetry is the map from initialSpace -> rootSpace.
   // We need to start with the map from rootSpace -> histSpace
-  int symmetryPathNodeToHist = SymmetryHelpers::compose(SymmetryHelpers::invert(node->book->initialSymmetry),symmetryAcc);
+  int symmetryPathNodeToHist = SymmetryHelpers::compose(SymmetryHelpers::invert(node->book->initialSymmetry,node->book->initialBoard.shape),symmetryAcc,node->book->initialBoard.shape);
   for(size_t i = 0; i < pathFromRoot.size()-1; i++) {
     auto iter = pathFromRoot[i]->moves.find(movesFromRoot[i]);
     // Convert move into space of hist and play it
@@ -639,7 +639,7 @@ bool ConstSymBookNode::getBoardHistoryReachingHere(BoardHistory& ret, vector<Loc
     // Update symmetryPathNodeToHist for the next loop.
     // symmetryPathNodeToHist is currently space[i] -> histSpace, and needs to become space[i+1] -> histSpace
     // symmetryToAlign[i] is space[i] -> space[i+1].
-    symmetryPathNodeToHist = SymmetryHelpers::compose(SymmetryHelpers::invert(iter->second.symmetryToAlign), symmetryPathNodeToHist);
+    symmetryPathNodeToHist = SymmetryHelpers::compose(SymmetryHelpers::invert(iter->second.symmetryToAlign,node->book->initialBoard.shape), symmetryPathNodeToHist,node->book->initialBoard.shape);
   }
 
   // Yay
@@ -764,10 +764,10 @@ void Book::setBonusByHash(const std::map<BookHash,double>& d) { bonusByHash = d;
 
 SymBookNode Book::getRoot() {
   // Invert because SymBookNode needs map from node space -> initial space, but initialSymmetry is map initial space -> node space.
-  return SymBookNode(root, SymmetryHelpers::invert(initialSymmetry));
+  return SymBookNode(root, SymmetryHelpers::invert(initialSymmetry,initialBoard.shape));
 }
 ConstSymBookNode Book::getRoot() const {
-  return ConstSymBookNode(root, SymmetryHelpers::invert(initialSymmetry));
+  return ConstSymBookNode(root, SymmetryHelpers::invert(initialSymmetry,initialBoard.shape));
 }
 
 SymBookNode Book::get(const BoardHistory& hist) {
@@ -1547,6 +1547,28 @@ void Book::exportToHtmlDir(
     out << "const devMode = " + (devMode ? string("true") : string("false")) + ";\n";
     out << "const bSizeX = " + Global::intToString(initialBoard.x_size) + ";\n";
     out << "const bSizeY = " + Global::intToString(initialBoard.y_size) + ";\n";
+    const int numSymmetries = SymmetryHelpers::numSymmetries(initialBoard.shape);
+    nlohmann::json symPositions = nlohmann::json::array();
+    nlohmann::json symCompositions = nlohmann::json::array();
+    vector<int> inverseSymmetries;
+    for(int symmetry = 0; symmetry < numSymmetries; symmetry++) {
+      vector<int> positions;
+      for(int y = 0; y < initialBoard.y_size; y++) {
+        for(int x = 0; x < initialBoard.x_size; x++) {
+          Loc loc = SymmetryHelpers::getSymLoc(x,y,initialBoard,symmetry);
+          positions.push_back(Location::getX(loc,initialBoard.x_size) + Location::getY(loc,initialBoard.x_size)*initialBoard.x_size);
+        }
+      }
+      symPositions.push_back(positions);
+      vector<int> compositions;
+      for(int next = 0; next < numSymmetries; next++)
+        compositions.push_back(SymmetryHelpers::compose(symmetry,next,initialBoard.shape));
+      symCompositions.push_back(compositions);
+      inverseSymmetries.push_back(SymmetryHelpers::invert(symmetry,initialBoard.shape));
+    }
+    out << "const symPositions = " << symPositions.dump() << ";\n";
+    out << "const symCompositions = " << symCompositions.dump() << ";\n";
+    out << "const inverseSymmetries = " << nlohmann::json(inverseSymmetries).dump() << ";\n";
     out << Book::BOOK_JS1;
     out << Book::BOOK_JS2;
     out << Book::BOOK_JS3;

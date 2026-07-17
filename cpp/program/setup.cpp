@@ -18,6 +18,7 @@ std::vector<std::string> Setup::getBackendPrefixes() {
   prefixes.push_back("trt");
   prefixes.push_back("opencl");
   prefixes.push_back("eigen");
+  prefixes.push_back("native");
   prefixes.push_back("dummybackend");
   return prefixes;
 }
@@ -85,6 +86,8 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
   string backendPrefix = "trt";
   #elif defined(USE_OPENCL_BACKEND)
   string backendPrefix = "opencl";
+  #elif defined(USE_NATIVE_BACKEND)
+  string backendPrefix = "native";
   #elif defined(USE_EIGEN_BACKEND)
   string backendPrefix = "eigen";
   #else
@@ -260,8 +263,10 @@ vector<NNEvaluator*> Setup::initializeNNEvaluators(
       useNHWCMode = cfg.getEnabled("useNHWC");
 
     int forcedSymmetry = -1;
-    if(setupFor != SETUP_FOR_DISTRIBUTED && cfg.contains("nnForcedSymmetry"))
-      forcedSymmetry = cfg.getInt("nnForcedSymmetry",0,SymmetryHelpers::NUM_SYMMETRIES-1);
+    if(setupFor != SETUP_FOR_DISTRIBUTED && cfg.contains("nnForcedSymmetry")) {
+      BoardShape shape = cfg.contains("boardShape") ? BoardShapeIO::parse(cfg.getString("boardShape")) : Board::DEFAULT_SHAPE;
+      forcedSymmetry = cfg.getInt("nnForcedSymmetry",0,SymmetryHelpers::numSymmetries(shape)-1);
+    }
 
     logger.write(
       "After dedups: nnModelFile" + idxStr + " = " + nnModelFile
@@ -741,6 +746,7 @@ vector<pair<set<string>,set<string>>> Setup::getMutexKeySets() {
 }
 
 std::vector<std::unique_ptr<PatternBonusTable>> Setup::loadAvoidSgfPatternBonusTables(ConfigParser& cfg, Logger& logger) {
+  const BoardShape boardShape = cfg.contains("boardShape") ? BoardShapeIO::parse(cfg.getString("boardShape")) : Board::DEFAULT_SHAPE;
   vector<SearchParams> paramss;
   int numBots = 1;
   if(cfg.contains("numBots"))
@@ -776,7 +782,7 @@ std::vector<std::unique_ptr<PatternBonusTable>> Setup::loadAvoidSgfPatternBonusT
         if(patternBonusTable == nullptr)
           patternBonusTable = std::make_unique<PatternBonusTable>();
         string logSource = "bot " + idxStr;
-        patternBonusTable->avoidRepeatedSgfMoves(sgfDirs,penalty,lambda,minTurnNumber,maxFiles,allowedPlayerNames,logger,logSource);
+        patternBonusTable->avoidRepeatedSgfMoves(sgfDirs,penalty,lambda,minTurnNumber,maxFiles,allowedPlayerNames,logger,logSource,boardShape);
       }
     }
     tables.push_back(std::move(patternBonusTable));

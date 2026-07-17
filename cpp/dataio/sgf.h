@@ -32,6 +32,7 @@ struct SgfNode {
   void accumPlacements(std::vector<Move>& moves, int xSize, int ySize) const;
   void accumMoves(std::vector<Move>& moves, int xSize, int ySize) const;
 
+  BoardShape getBoardShape(BoardShape defaultShape = Board::DEFAULT_SHAPE) const;
   Color getPLSpecifiedColor() const;
   Rules getRulesFromRUTagOrFail() const;
   Player getSgfWinner() const;
@@ -58,6 +59,7 @@ struct Sgf {
   static std::vector<Sgf*> loadSgfsFiles(const std::vector<std::string>& files);
 
   XYSize getXYSize() const;
+  BoardShape getBoardShape(BoardShape defaultShape = Board::DEFAULT_SHAPE) const;
   bool hasRules() const;
   Rules getRulesOrFail() const;
   Player getSgfWinner() const;
@@ -117,7 +119,8 @@ struct Sgf {
     bool hashParent,
     bool allowGameOver,
     Rand* rand,
-    std::vector<PositionSample>& samples
+    std::vector<PositionSample>& samples,
+    BoardShape defaultShape = Board::DEFAULT_SHAPE
   ) const;
   //f is allowed to mutate and consume sample.
   void iterAllUniquePositions(
@@ -126,7 +129,8 @@ struct Sgf {
     bool hashParent,
     bool allowGameOver,
     Rand* rand,
-    std::function<void(PositionSample&,const BoardHistory&,const std::string&)> f
+    std::function<void(PositionSample&,const BoardHistory&,const std::string&)> f,
+    BoardShape defaultShape = Board::DEFAULT_SHAPE
   ) const;
 
   static std::set<Hash128> readExcludes(const std::vector<std::string>& files);
@@ -188,12 +192,12 @@ struct CompactSgf {
   Rules getRulesOrFailAllowUnspecified(const Rules& defaultRules) const;
   Rules getRulesOrWarn(const Rules& defaultRules, std::function<void(const std::string& msg)> f) const;
 
-  void setupInitialBoardAndHist(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist) const;
+  void setupInitialBoardAndHist(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, BoardShape defaultShape = Board::DEFAULT_SHAPE) const;
   void playMovesAssumeLegal(Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx) const;
-  void setupBoardAndHistAssumeLegal(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx) const;
+  void setupBoardAndHistAssumeLegal(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx, BoardShape defaultShape = Board::DEFAULT_SHAPE) const;
   //These throw a StringError upon illegal move.
   void playMovesTolerant(Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx) const;
-  void setupBoardAndHistTolerant(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx) const;
+  void setupBoardAndHistTolerant(const Rules& initialRules, Board& board, Player& nextPla, BoardHistory& hist, int64_t turnIdx, BoardShape defaultShape = Board::DEFAULT_SHAPE) const;
 };
 
 namespace WriteSgf {

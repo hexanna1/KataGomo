@@ -19,6 +19,19 @@
 
 struct Board;
 
+enum class BoardShape : int8_t {
+  Y = 0,
+  BentY = 1,
+  Yavalath = 2,
+  Hex = 3,
+};
+
+namespace BoardShapeIO {
+  std::string toString(BoardShape shape);
+  bool tryParse(const std::string& s, BoardShape& shape);
+  BoardShape parse(const std::string& s);
+}
+
 //Player
 typedef int8_t Player;
 static constexpr Player P_BLACK = 1;
@@ -79,7 +92,6 @@ namespace Location
 STRUCT_NAMED_PAIR(Loc,loc,Player,pla,Move);
 
 //Fast lightweight board designed for playouts and simulations, where speed is essential.
-//Simple ko rule only.
 //Does not enforce player turn order.
 
 struct Board
@@ -91,6 +103,12 @@ struct Board
   static void initCaptureTable();//called in initHash for convenience
 
   //Board parameters and Constants----------------------------------------
+
+#ifdef DEFAULT_GAME_HEX
+  static constexpr BoardShape DEFAULT_SHAPE = BoardShape::Hex;
+#else
+  static constexpr BoardShape DEFAULT_SHAPE = BoardShape::Y;
+#endif
 
   static constexpr int MAX_LEN = COMPILE_MAX_BOARD_LEN;  //Maximum edge length allowed for the board
   static constexpr int DEFAULT_LEN = std::min(MAX_LEN,19); //Default edge length for board if unspecified
@@ -106,6 +124,7 @@ struct Board
   static bool IS_ZOBRIST_INITALIZED;
   static Hash128 ZOBRIST_SIZE_X_HASH[MAX_LEN+1];
   static Hash128 ZOBRIST_SIZE_Y_HASH[MAX_LEN+1];
+  static Hash128 ZOBRIST_BOARD_SHAPE_HASH[4];
   static Hash128 ZOBRIST_BOARD_HASH[MAX_ARR_SIZE][4];
   static Hash128 ZOBRIST_MOVENUM_HASH[MAX_ARR_SIZE];
   static Hash128 ZOBRIST_LASTMOVE_HASH[MAX_ARR_SIZE];
@@ -125,6 +144,7 @@ struct Board
   //Constructors---------------------------------
   Board();  //Create Board of size (DEFAULT_LEN,DEFAULT_LEN)
   Board(int x, int y); //Create Board of size (x,y)
+  Board(int x, int y, BoardShape shape); //Create Board of size (x,y) with the given shape
   Board(const Board& other);
 
   Board& operator=(const Board&) = default;
@@ -134,6 +154,11 @@ struct Board
   bool isLegal(Loc loc, Player pla) const;
   //Check if this location is on the board
   bool isOnBoard(Loc loc) const;
+  bool isPlayablePoint(int x, int y) const;
+  int playableArea() const;
+  int sideMask(Loc loc) const;
+  int getAdjacentLocs(Loc loc, Loc buf[6]) const;
+  static bool isValidSizeForShape(int xSize, int ySize, BoardShape shape);
   //Is this board empty?
   bool isEmpty() const;
   //Count the number of stones on the board
@@ -143,13 +168,10 @@ struct Board
   bool checkConnection(int8_t* buf, Player pla, bool includeJumpConnection) const;
 
   //Sets the specified stone if possible, including overwriting existing stones.
-  //Resolves any captures and/or suicides that result from setting that stone, including deletions of the stone itself.
   //Returns false if location or color were out of range.
   bool setStone(Loc loc, Color color);
 
-  // Same, but sets multiple stones, and only requires that the final configuration contain no zero-liberty groups.
-  // If it does contain a zero liberty group, fails and returns false and leaves the board in an arbitrarily changed but
-  // valid state. Also returns false if any location is specified more than once.
+  //Sets multiple stones. Returns false for invalid locations, colors, or duplicate locations.
   bool setStones(std::vector<Move> placements);
 
   //Plays the specified move, assuming it is legal.
@@ -166,7 +188,9 @@ struct Board
   bool isEqualForTesting(const Board& other) const;
 
   static Board parseBoard(int xSize, int ySize, const std::string& s);
+  static Board parseBoard(int xSize, int ySize, BoardShape shape, const std::string& s);
   static Board parseBoard(int xSize, int ySize, const std::string& s, char lineDelimiter);
+  static Board parseBoard(int xSize, int ySize, BoardShape shape, const std::string& s, char lineDelimiter);
   static void printBoard(std::ostream& out, const Board& board, Loc markLoc, const std::vector<Move>* hist);
   static std::string toStringSimple(const Board& board, char lineDelimiter);
   static nlohmann::json toJson(const Board& board);
@@ -176,18 +200,21 @@ struct Board
 
   int x_size;                  //Horizontal size of board
   int y_size;                  //Vertical size of board
+  BoardShape shape;            //Playable board geometry
   Color colors[MAX_ARR_SIZE];  //Color of each location on the board.
   int movenum; //how many moves
   int stonenum; //how many stones on board
 
   /* PointList empty_list; //List of all empty locations on board */
 
-  Hash128 pos_hash; //A zobrist hash of the current board position (does not include ko point or player to move)
+  Hash128 pos_hash; //A zobrist hash of the current board position (does not include player to move)
 
-  short adj_offsets[8]; //Indices 0-3: Offsets to add for adjacent points. Indices 4-7: Offsets for diagonal points. 2 and 3 are +x and +y.
+  short adj_offsets[8]; //Indices 0-5: Offsets to add for adjacent triangular-hex points. 2 and 3 are +x and +y.
 
   private:
-  void init(int xS, int yS);
+  bool checkHexConnection(int8_t* buf, Player pla, bool includeJumpConnection) const;
+  bool isHexDeadOrCaptured(Loc loc) const;
+  void init(int xS, int yS, BoardShape boardShape);
 
   friend std::ostream& operator<<(std::ostream& out, const Board& board);
 

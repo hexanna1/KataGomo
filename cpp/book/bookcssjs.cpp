@@ -167,38 +167,14 @@ function getBadnessColorOfMoveIdx(idx, alpha) {
 }
 
 function getSymPos(pos) {
-  let y = Math.floor(pos / bSizeX);
-  let x = pos % bSizeX;
-  if(sym & 1)
-    y = bSizeY-1-y;
-  if(sym & 2)
-    x = bSizeX-1-x;
-  if(sym >= 4 && bSizeX == bSizeY) {
-    let tmp = x;
-    x = y;
-    y = tmp;
-  }
-  return x + y*bSizeX;
+  return symPositions[sym][pos];
 }
 function getInvSymPos(pos) {
-  let y = Math.floor(pos / bSizeX);
-  let x = pos % bSizeX;
-  if(sym >= 4 && bSizeX == bSizeY) {
-    let tmp = x;
-    x = y;
-    y = tmp;
-  }
-  if(sym & 1)
-    y = bSizeY-1-y;
-  if(sym & 2)
-    x = bSizeX-1-x;
-  return x + y*bSizeX;
+  return symPositions[inverseSymmetries[sym]][pos];
 }
 
 function compose(sym1,sym2) {
-  if(sym1 & 0x4)
-    sym2 = (sym2 & 0x4) | ((sym2 & 0x2) >> 1) | ((sym2 & 0x1) << 1);
-  return sym1 ^ sym2;
+  return symCompositions[sym1][sym2];
 }
 
 function getLinkForPos(pos) {

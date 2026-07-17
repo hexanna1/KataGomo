@@ -57,8 +57,10 @@ Hash128 LocalPatternHasher::getHash(const Board& board, Loc loc, Player pla) con
     int x = Location::getX(loc,board.x_size);
     int y = Location::getY(loc,board.x_size);
     int dxMin = -xRadius, dxMax = xRadius, dyMin = -yRadius, dyMax = yRadius;
-    if(x < xRadius) { dxMin = -x; } else if(x >= board.x_size-xRadius) { dxMax = board.x_size-1-x; }
-    if(y < yRadius) { dyMin = -y; } else if(y >= board.y_size-yRadius) { dyMax = board.y_size-1-y; }
+    if(x < xRadius) { dxMin = -x; }
+    if(x >= board.x_size-xRadius) { dxMax = board.x_size-1-x; }
+    if(y < yRadius) { dyMin = -y; }
+    if(y >= board.y_size-yRadius) { dyMax = board.y_size-1-y; }
     for(int dy = dyMin; dy <= dyMax; dy++) {
       for(int dx = dxMin; dx <= dxMax; dx++) {
         Loc loc2 = loc + dx * dxi + dy * dyi;
@@ -88,15 +90,17 @@ Hash128 LocalPatternHasher::getHashWithSym(const Board& board, Loc loc, Player p
     int xCenter = xSize/2;
     int yCenter = ySize/2;
 
-    bool transpose = SymmetryHelpers::isTranspose(symmetry);
-    bool flipX = SymmetryHelpers::isFlipX(symmetry);
-    bool flipY = SymmetryHelpers::isFlipY(symmetry);
+    bool transpose = SymmetryHelpers::isHexTranspose(symmetry);
+    bool flipX = SymmetryHelpers::isHexRotation(symmetry);
+    bool flipY = SymmetryHelpers::isHexRotation(symmetry);
 
     int x = Location::getX(loc,board.x_size);
     int y = Location::getY(loc,board.x_size);
     int dxMin = -xRadius, dxMax = xRadius, dyMin = -yRadius, dyMax = yRadius;
-    if(x < xRadius) { dxMin = -x; } else if(x >= board.x_size-xRadius) { dxMax = board.x_size-1-x; }
-    if(y < yRadius) { dyMin = -y; } else if(y >= board.y_size-yRadius) { dyMax = board.y_size-1-y; }
+    if(x < xRadius) { dxMin = -x; }
+    if(x >= board.x_size-xRadius) { dxMax = board.x_size-1-x; }
+    if(y < yRadius) { dyMin = -y; }
+    if(y >= board.y_size-yRadius) { dyMax = board.y_size-1-y; }
     for(int dy = dyMin; dy <= dyMax; dy++) {
       for(int dx = dxMin; dx <= dxMax; dx++) {
         Loc loc2 = loc + dx * dxi + dy * dyi;

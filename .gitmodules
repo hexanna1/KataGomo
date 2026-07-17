@@ -1,0 +1,4 @@
+[submodule "deps/KataGo"]
+	path = deps/KataGo
+	url = https://github.com/lightvector/KataGo.git
+	shallow = true

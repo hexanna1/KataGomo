@@ -204,6 +204,7 @@ struct GTPEngine {
   NNEvaluator* nnEval;
   AsyncBot* bot;
   Rules currentRules; //Should always be the same as the rules in bot, if bot is not NULL.
+  BoardShape boardShape;
 
   //Stores the params we want to be using during genmoves or analysis
   SearchParams params;
@@ -227,6 +228,7 @@ struct GTPEngine {
 
   GTPEngine(
     const string& modelFile, SearchParams initialParams, Rules initialRules,
+    BoardShape initialBoardShape,
     double staticPDA,
     double normAvoidRepeatedPatternUtility,
     double genmoveWRN, double analysisWRN,
@@ -242,6 +244,7 @@ struct GTPEngine {
      nnEval(NULL),
      bot(NULL),
      currentRules(initialRules),
+     boardShape(initialBoardShape),
      params(initialParams),
      bTimeControls(),
      wTimeControls(),
@@ -276,8 +279,11 @@ struct GTPEngine {
 
   //Specify -1 for the sizes for a default
   void setOrResetBoardSize(ConfigParser& cfg, Logger& logger, Rand& seedRand, int boardXSize, int boardYSize, bool loggingToStderr) {
-    if(nnEval != NULL && boardXSize == nnEval->getNNXLen() && boardYSize == nnEval->getNNYLen())
+    if(nnEval != NULL && boardXSize == bot->getRootBoard().x_size && boardYSize == bot->getRootBoard().y_size) {
+      bot->stopAndWait();
+      clearBoard();
       return;
+    }
     if(nnEval != NULL) {
       assert(bot != NULL);
       bot->stopAndWait();
@@ -330,9 +336,11 @@ struct GTPEngine {
       boardXSize = nnEval->getNNXLen();
       boardYSize = nnEval->getNNYLen();
     }
-    logger.write("Initializing board with boardXSize " + Global::intToString(boardXSize) + " boardYSize " + Global::intToString(boardYSize));
+    if(!Board::isValidSizeForShape(boardXSize,boardYSize,boardShape))
+      throw StringError("Board size " + Global::intToString(boardXSize) + "x" + Global::intToString(boardYSize) + " is not valid for boardShape " + BoardShapeIO::toString(boardShape));
+    logger.write("Initializing board with boardXSize " + Global::intToString(boardXSize) + " boardYSize " + Global::intToString(boardYSize) + " boardShape " + BoardShapeIO::toString(boardShape));
     if(!loggingToStderr)
-      cerr << ("Initializing board with boardXSize " + Global::intToString(boardXSize) + " boardYSize " + Global::intToString(boardYSize)) << endl;
+      cerr << ("Initializing board with boardXSize " + Global::intToString(boardXSize) + " boardYSize " + Global::intToString(boardYSize) + " boardShape " + BoardShapeIO::toString(boardShape)) << endl;
 
     string searchRandSeed;
     if(cfg.contains("searchRandSeed"))
@@ -343,7 +351,7 @@ struct GTPEngine {
     bot = new AsyncBot(params, nnEval, &logger, searchRandSeed);
     bot->setCopyOfExternalPatternBonusTable(patternBonusTable);
 
-    Board board(boardXSize,boardYSize);
+    Board board(boardXSize,boardYSize,boardShape);
     Player pla = P_BLACK;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
@@ -353,7 +361,10 @@ struct GTPEngine {
 
   void setPositionAndRules(Player pla, const Board& board, const BoardHistory& h, const Board& newInitialBoard, Player newInitialPla, const vector<Move> newMoveHistory) {
     BoardHistory hist(h);
+    if(board.shape == BoardShape::Hex)
+      hist.setPassIsLoss(false);
 
+    boardShape = board.shape;
     currentRules = hist.rules;
     bot->setPosition(pla,board,hist);
     initialBoard = newInitialBoard;
@@ -366,7 +377,7 @@ struct GTPEngine {
     assert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
+    Board board(newXSize,newYSize,boardShape);
     Player pla = P_BLACK;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
@@ -378,7 +389,7 @@ struct GTPEngine {
     assert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
+    Board board(newXSize,newYSize,boardShape);
     bool suc = board.setStones(initialStones);
     if(!suc)
       return false;
@@ -869,7 +880,7 @@ struct GTPEngine {
     string policyStr = "Policy: ";
     string wlStr = "White winloss: ";
 
-    for(int symmetry = 0; symmetry < SymmetryHelpers::NUM_SYMMETRIES; symmetry++) {
+    for(int symmetry = 0; symmetry < SymmetryHelpers::numSymmetries(bot->getRootBoard().shape); symmetry++) {
       if(whichSymmetry == NNInputs::SYMMETRY_ALL || whichSymmetry == symmetry) {
         {
           MiscNNInputParams nnInputParams;
@@ -910,7 +921,7 @@ struct GTPEngine {
       return "";
     ostringstream out;
 
-    for(int symmetry = 0; symmetry < SymmetryHelpers::NUM_SYMMETRIES; symmetry++) {
+    for(int symmetry = 0; symmetry < SymmetryHelpers::numSymmetries(bot->getRootBoard().shape); symmetry++) {
       if(whichSymmetry == NNInputs::SYMMETRY_ALL || whichSymmetry == symmetry) {
         Board board = bot->getRootBoard();
         BoardHistory hist = bot->getRootHist();
@@ -1185,6 +1196,8 @@ int MainCmds::gtp(const vector<string>& args) {
   if(startupPrintMessageToStderr && !logger.isLoggingToStderr()) {
     cerr << "Using " + initialRules.toStringMaybeNice() + " rules initially, unless GTP/GUI overrides this" << endl;
   }
+  BoardShape boardShape = cfg.contains("boardShape") ? BoardShapeIO::parse(cfg.getString("boardShape")) : Board::DEFAULT_SHAPE;
+  logger.write("Using board shape " + BoardShapeIO::toString(boardShape));
 
   SearchParams initialParams = Setup::loadSingleParams(cfg,Setup::SETUP_FOR_GTP);
   logger.write("Using " + Global::intToString(initialParams.numThreads) + " CPU thread(s) for search");
@@ -1230,7 +1243,7 @@ int MainCmds::gtp(const vector<string>& args) {
   Player perspective = Setup::parseReportAnalysisWinrates(cfg,C_EMPTY);
 
   GTPEngine* engine = new GTPEngine(
-    nnModelFile,initialParams,initialRules,
+    nnModelFile,initialParams,initialRules,boardShape,
     staticPlayoutDoublingAdvantage,
     normalAvoidRepeatedPatternUtility, 
     genmoveWideRootNoise,analysisWideRootNoise,
@@ -1401,6 +1414,10 @@ int MainCmds::gtp(const vector<string>& args) {
       else if(newXSize > Board::MAX_LEN || newYSize > Board::MAX_LEN) {
         responseIsError = true;
         response = Global::strprintf("unacceptable size (Board::MAX_LEN is %d, consider increasing and recompiling)",(int)Board::MAX_LEN);
+      }
+      else if(!Board::isValidSizeForShape(newXSize,newYSize,engine->boardShape)) {
+        responseIsError = true;
+        response = "unacceptable size for boardShape " + BoardShapeIO::toString(engine->boardShape);
       }
       else {
         engine->setOrResetBoardSize(cfg,logger,seedRand,newXSize,newYSize,logger.isLoggingToStderr());
@@ -2061,6 +2078,30 @@ int MainCmds::gtp(const vector<string>& args) {
     }
 
 
+    else if(command == "analyze" || command == "lz-analyze" || command == "kata-analyze") {
+      Player pla = engine->bot->getRootPla();
+      bool parseFailed = false;
+      GTPEngine::AnalyzeArgs analyzeArgs = parseAnalyzeCommand(command, pieces, pla, parseFailed, engine);
+
+      if(parseFailed) {
+        responseIsError = true;
+        response = "Could not parse analyze arguments or arguments out of range: '" + Global::concat(pieces," ") + "'";
+      }
+      else {
+        //Make sure the "equals" for GTP is printed out prior to the first analyze line, regardless of thread racing
+        if(hasId)
+          cout << "=" << Global::intToString(id) << endl;
+        else
+          cout << "=" << endl;
+
+        engine->analyze(pla, analyzeArgs);
+
+        //No response - currentlyAnalyzing will make sure we get a newline at the appropriate time, when stopped.
+        suppressResponse = true;
+        currentlyAnalyzing = true;
+      }
+    }
+
     else if(command == "loadsgf") {
       if(pieces.size() != 1 && pieces.size() != 2) {
         responseIsError = true;
@@ -2134,7 +2175,7 @@ int MainCmds::gtp(const vector<string>& args) {
               }
             }
 
-            sgf->setupInitialBoardAndHist(sgfRules, sgfInitialBoard, sgfInitialNextPla, sgfInitialHist);
+            sgf->setupInitialBoardAndHist(sgfRules, sgfInitialBoard, sgfInitialNextPla, sgfInitialHist, engine->boardShape);
             sgfInitialHist.setInitialTurnNumber(sgfInitialBoard.numStonesOnBoard()); //Should give more accurate temperaure and time control behavior
             sgfBoard = sgfInitialBoard;
             sgfNextPla = sgfInitialNextPla;
@@ -2159,6 +2200,7 @@ int MainCmds::gtp(const vector<string>& args) {
           }
 
           if(sgfParseSuccess) {
+            engine->boardShape = sgfBoard.shape;
             engine->setOrResetBoardSize(cfg,logger,seedRand,sgfBoard.x_size,sgfBoard.y_size,logger.isLoggingToStderr());
             engine->setPositionAndRules(sgfNextPla, sgfBoard, sgfHist, sgfInitialBoard, sgfInitialNextPla, sgfHist.moveHistory);
           }
@@ -2169,7 +2211,7 @@ int MainCmds::gtp(const vector<string>& args) {
     else if(command == "printsgf") {
       if(pieces.size() != 0 && pieces.size() != 1) {
         responseIsError = true;
-        response = "Expected zero or one argument for print but got '" + Global::concat(pieces," ") + "'";
+        response = "Expected zero or one argument for printsgf but got '" + Global::concat(pieces," ") + "'";
       }
       else {
         auto writeSgfToStream = [&](ostream& out) {
@@ -2196,30 +2238,6 @@ int MainCmds::gtp(const vector<string>& args) {
       }
     }
 
-    else if(command == "analyze" || command == "lz-analyze" || command == "kata-analyze") {
-      Player pla = engine->bot->getRootPla();
-      bool parseFailed = false;
-      GTPEngine::AnalyzeArgs analyzeArgs = parseAnalyzeCommand(command, pieces, pla, parseFailed, engine);
-
-      if(parseFailed) {
-        responseIsError = true;
-        response = "Could not parse analyze arguments or arguments out of range: '" + Global::concat(pieces," ") + "'";
-      }
-      else {
-        //Make sure the "equals" for GTP is printed out prior to the first analyze line, regardless of thread racing
-        if(hasId)
-          cout << "=" << Global::intToString(id) << endl;
-        else
-          cout << "=" << endl;
-
-        engine->analyze(pla, analyzeArgs);
-
-        //No response - currentlyAnalyzing will make sure we get a newline at the appropriate time, when stopped.
-        suppressResponse = true;
-        currentlyAnalyzing = true;
-      }
-    }
-
     else if(command == "kata-raw-nn") {
       int whichSymmetry = NNInputs::SYMMETRY_ALL;
       bool parsed = false;
@@ -2227,13 +2245,16 @@ int MainCmds::gtp(const vector<string>& args) {
         string s = Global::trim(Global::toLower(pieces[0]));
         if(s == "all")
           parsed = true;
-        else if(Global::tryStringToInt(s,whichSymmetry) && whichSymmetry >= 0 && whichSymmetry <= SymmetryHelpers::NUM_SYMMETRIES-1)
+        else if(Global::tryStringToInt(s,whichSymmetry) && whichSymmetry >= 0 && whichSymmetry < SymmetryHelpers::numSymmetries(engine->bot->getRootBoard().shape))
           parsed = true;
       }
 
       if(!parsed) {
         responseIsError = true;
-        response = "Expected one argument 'all' or symmetry index [0-7] for kata-raw-nn but got '" + Global::concat(pieces," ") + "'";
+        response =
+          "Expected one argument 'all' or symmetry index [0-" +
+          Global::intToString(SymmetryHelpers::numSymmetries(engine->bot->getRootBoard().shape)-1) +
+          "] for kata-raw-nn but got '" + Global::concat(pieces," ") + "'";
       }
       else {
         response = engine->rawNN(whichSymmetry);

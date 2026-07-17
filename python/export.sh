@@ -1,16 +1,14 @@
-
-                        rm -f "$BASEDIR"/latest.bin.gz
-                        cp -f "$TMPDST"/model.bin.gz "$BASEDIR"/latest.bin.gz#!/bin/bash -eu
+#!/bin/bash -eu
+set -eu
 set -o pipefail
 {
-#Takes any models in torchmodels_toexport/ and outputs a cuda-runnable model file to modelstobetested/
-#Takes any models in torchmodels_toexport_extra/ and outputs a cuda-runnable model file to models_extra/
-#Should be run periodically.
+# Export PyTorch checkpoints to engine models, using averaged weights.
+# Main exports go to modelstobetested/ or models/; extra exports go to models_extra/.
 
 if [[ $# -ne 3 ]]
 then
     echo "Usage: $0 NAMEPREFIX BASEDIR USEGATING"
-    echo "Currently expects to be run from within the 'python' directory of the KataGo repo, or otherwise in the same dir as export_model.py."
+    echo "Run from the python directory containing export_model_pytorch.py."
     echo "NAMEPREFIX string prefix for this training run, try to pick something globally unique. Will be displayed to users when KataGo loads the model."
     echo "BASEDIR containing selfplay data and models and related directories"
     echo "USEGATING = 1 to use gatekeeper, 0 to not use gatekeeper and output directly to models/"
@@ -22,6 +20,7 @@ BASEDIR="$1"
 shift
 USEGATING="$1"
 shift
+PYTHON="${PYTHON:-python3}"
 
 #------------------------------------------------------------------------------
 
@@ -36,14 +35,17 @@ function exportStuff() {
     TODIR="$2"
 
     #Sort by timestamp so that we process in order of oldest to newest if there are multiple
-    for FILEPATH in $(find "$BASEDIR"/"$FROMDIR"/ -mindepth 1 -maxdepth 1 -printf "%T@ %p\n" | sort -n | cut -d ' ' -f 2)
+    while IFS= read -r FILEPATH
     do
-        #Make sure to skip tmp directories that are transiently there by the tensorflow training,
-        #they are probably in the process of being written
-        if [ ${FILEPATH: -4} == ".tmp" ]
+        if [ -z "$FILEPATH" ]
+        then
+            continue
+        fi
+        # Skip checkpoint directories while the trainer is publishing them.
+        if [[ "${FILEPATH: -4}" == ".tmp" ]]
         then
             echo "Skipping tmp file:" "$FILEPATH"
-        elif [ ${FILEPATH: -9} == ".exported" ]
+        elif [[ "${FILEPATH: -9}" == ".exported" ]]
         then
             echo "Skipping self tmp file:" "$FILEPATH"
         else
@@ -66,7 +68,7 @@ function exportStuff() {
                 mkdir "$TMPDST"
 
                 set -x
-                python ./export_model_pytorch.py \
+                "$PYTHON" ./export_model_pytorch.py \
                         -checkpoint "$SRC"/model.ckpt \
                         -export-dir "$TMPDST" \
                         -model-name "$NAMEPREFIX""-""$NAME" \
@@ -74,9 +76,8 @@ function exportStuff() {
                         -use-swa
                 set +x
 
-                mv "$SRC"/model.ckpt "$TMPDST"/
-
-                rm -r "$SRC"
+                # Keep the queued checkpoint until publication without copying its optimizer state.
+                ln "$SRC"/model.ckpt "$TMPDST"/model.ckpt
                 gzip "$TMPDST"/model.bin
 
                 #Make a bunch of the directories that selfplay will need so that there isn't a race on the selfplay
@@ -91,19 +92,30 @@ function exportStuff() {
                         mkdir -p "$BASEDIR"/selfplay/"$NAME"/sgfs
                         mkdir -p "$BASEDIR"/selfplay/"$NAME"/tdata
                         mkdir -p "$BASEDIR"/selfplay/"$NAME"/vdata
-                        rm -f "$BASEDIR"/latest.bin.gz
-                        cp -f "$TMPDST"/model.bin.gz "$BASEDIR"/latest.bin.gz
+                        cp -f "$TMPDST"/model.bin.gz "$BASEDIR"/.latest.bin.gz
+                        mv -f "$BASEDIR"/.latest.bin.gz "$BASEDIR"/latest.bin.gz
                     fi
                 fi
 
-                #Sleep a little to allow some tolerance on the filesystem
-                sleep 5
-
                 mv "$TMPDST" "$TARGET"
+                rm -r "$SRC"
                 echo "Done exporting:" "$NAME" "to" "$TARGET"
             fi
         fi
-    done
+    done < <("$PYTHON" - "$BASEDIR"/"$FROMDIR" <<'PY'
+import os
+import sys
+
+base = sys.argv[1]
+if not os.path.isdir(base):
+    sys.exit(0)
+
+paths = [os.path.join(base, name) for name in os.listdir(base)]
+paths.sort(key=lambda path: os.path.getmtime(path))
+for path in paths:
+    print(path)
+PY
+    )
 }
 
 if [ "$USEGATING" -eq 0 ]

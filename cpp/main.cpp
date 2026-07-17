@@ -27,6 +27,7 @@ static void printHelp(const vector<string>& args) {
 ---Common subcommands------------------
 
 gtp : Runs GTP engine that can be plugged into any standard Go GUI for play/analysis.
+batchrawnn : Evaluate newline-delimited Hex positions with native neural-net batching.
 benchmark : Test speed with different numbers of search threads.
 genconfig : User-friendly interface to generate a config with rules and automatic performance tuning.
 
@@ -44,8 +45,6 @@ selfplay : Play selfplay games and generate training data.
 gatekeeper : Poll directory for new nets and match them against the latest net so far.
 
 ---Testing/debugging subcommands-------------
-evalsgf : Utility/debug tool, analyze a single position of a game from an SGF file.
-
 testgpuerror : Print the average error of the neural net between current config and fp32 config.
 
 
@@ -56,13 +55,15 @@ static int handleSubcommand(const string& subcommand, const vector<string>& args
   vector<string> subArgs(args.begin()+1,args.end());
   if(subcommand == "analysis")
     return MainCmds::analysis(subArgs);
+  if(subcommand == "batchrawnn")
+    return MainCmds::batchrawnn(subArgs);
   if(subcommand == "benchmark")
     return MainCmds::benchmark(subArgs);
   if(subcommand == "contribute")
     return MainCmds::contribute(subArgs);
   if(subcommand == "evalsgf")
     return MainCmds::evalsgf(subArgs);
-  else if(subcommand == "gatekeeper")
+  if(subcommand == "gatekeeper")
     return MainCmds::gatekeeper(subArgs);
   else if(subcommand == "genconfig")
     return MainCmds::genconfig(subArgs,args[0]);
@@ -171,6 +172,8 @@ string Version::getKataGoVersionFullInfo() {
   out << "Using TensorRT backend" << endl;
 #elif defined(USE_OPENCL_BACKEND)
   out << "Using OpenCL backend" << endl;
+#elif defined(USE_NATIVE_BACKEND)
+  out << "Using native inference backend" << endl;
 #elif defined(USE_EIGEN_BACKEND)
   out << "Using Eigen(CPU) backend" << endl;
 #else
@@ -203,6 +206,8 @@ string Version::getGitRevisionWithBackend() {
   s += "-trt";
 #elif defined(USE_OPENCL_BACKEND)
   s += "-opencl";
+#elif defined(USE_NATIVE_BACKEND)
+  s += "-native";
 #elif defined(USE_EIGEN_BACKEND)
   s += "-eigen";
 #else

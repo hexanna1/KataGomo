@@ -56,7 +56,7 @@ struct BookMove {
   BookMove(Loc move, int symmetryToAlign, BookHash hash, double rawPolicy);
 
   // Apply symmetry to this BookMove.
-  BookMove getSymBookMove(int symmetry, int xSize, int ySize);
+  BookMove getSymBookMove(int symmetry, int xSize, int ySize, BoardShape shape);
 };
 
 struct BookValues {

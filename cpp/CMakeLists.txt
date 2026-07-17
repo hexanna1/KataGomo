@@ -28,12 +28,21 @@ endif()
 set(BUILD_DISTRIBUTED 0 CACHE BOOL "Build with http support for contributing to distributed training")
 set(USE_BACKEND CACHE STRING "Neural net backend")
 string(TOUPPER "${USE_BACKEND}" USE_BACKEND)
-set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA TENSORRT OPENCL EIGEN)
+set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA TENSORRT OPENCL EIGEN NATIVE)
 
 set(USE_TCMALLOC 0 CACHE BOOL "Use TCMalloc")
 set(NO_GIT_REVISION 0 CACHE BOOL "Disable embedding the git revision into the compiled exe")
 set(USE_AVX2 0 CACHE BOOL "Compile with AVX2")
-set(USE_BIGGER_BOARDS_EXPENSIVE 0 CACHE BOOL "Allow boards up to size 29. Compiling with this will use more memory and slow down KataGo, even when playing on boards of size 19.")
+set(USE_BIGGER_BOARDS_EXPENSIVE 0 CACHE BOOL "Allow larger boards at increased memory and performance cost")
+set(DEFAULT_GAME HEX CACHE STRING "Default game family: HEX or Y")
+set_property(CACHE DEFAULT_GAME PROPERTY STRINGS HEX Y)
+if(DEFAULT_GAME STREQUAL "HEX")
+  add_compile_definitions(DEFAULT_GAME_HEX)
+  set(default_board_len 19)
+else()
+  set(default_board_len 21)
+endif()
+set(COMPILE_MAX_BOARD_LEN ${default_board_len} CACHE STRING "Maximum supported board edge length")
 
 #--------------------------- NEURAL NET BACKEND ------------------------------------------------------------------------
 
@@ -85,6 +94,8 @@ elseif(USE_BACKEND STREQUAL "OPENCL")
     neuralnet/openclhelpers.cpp
     neuralnet/opencltuner.cpp
     )
+elseif(USE_BACKEND STREQUAL "NATIVE")
+  set(NEURALNET_BACKEND_SOURCES neuralnet/nativebackend.cpp)
 elseif(USE_BACKEND STREQUAL "EIGEN")
   message(STATUS "-DUSE_BACKEND=EIGEN, using Eigen CPU backend.")
   if(NOT USE_AVX2)
@@ -94,7 +105,7 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
     neuralnet/eigenbackend.cpp
     )
 elseif(USE_BACKEND STREQUAL "")
-  message(WARNING "${ColorBoldRed}WARNING: Using dummy neural net backend, intended for non-neural-net testing only, will fail on any code path requiring a neural net. To use neural net, specify -DUSE_BACKEND=CUDA or -DUSE_BACKEND=TENSORRT or -DUSE_BACKEND=OPENCL or -DUSE_BACKEND=EIGEN to compile with the respective backend.${ColorReset}")
+  message(WARNING "${ColorBoldRed}WARNING: Using dummy neural net backend, intended for non-neural-net testing only, will fail on any code path requiring a neural net. To use neural net, specify -DUSE_BACKEND=CUDA or -DUSE_BACKEND=TENSORRT or -DUSE_BACKEND=OPENCL or -DUSE_BACKEND=EIGEN, or use scripts/build_engine.sh for native inference.${ColorReset}")
   set(NEURALNET_BACKEND_SOURCES neuralnet/dummybackend.cpp)
 else()
   message(FATAL_ERROR "Unrecognized backend: " ${USE_BACKEND})
@@ -181,6 +192,7 @@ add_executable(katago
   core/threadtest.cpp
   core/timer.cpp
   game/board.cpp
+  game/benty.cpp
   game/rules.cpp
   game/gamelogic.cpp
   game/randomopening.cpp
@@ -238,6 +250,7 @@ add_executable(katago
   command/genbook.cpp
   command/gputest.cpp
   command/gtp.cpp
+  command/batchrawnn.cpp
   command/match.cpp
   command/matchauto.cpp
   command/misc.cpp
@@ -302,6 +315,11 @@ elseif(USE_BACKEND STREQUAL "OPENCL")
     link_directories(${OpenCL_LIBRARY})
     target_link_libraries(katago ${OpenCL_LIBRARY})
   endif()
+elseif(USE_BACKEND STREQUAL "NATIVE")
+  target_compile_definitions(katago PRIVATE USE_NATIVE_BACKEND)
+  add_library(katagoinference SHARED IMPORTED)
+  set_target_properties(katagoinference PROPERTIES IMPORTED_LOCATION "${NATIVE_LIBRARY}")
+  target_link_libraries(katago katagoinference)
 elseif(USE_BACKEND STREQUAL "EIGEN")
   target_compile_definitions(katago PRIVATE USE_EIGEN_BACKEND)
   if(NOT (MSVC OR MINGW))
@@ -326,8 +344,9 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
 endif()
 
 if(USE_BIGGER_BOARDS_EXPENSIVE)
-  target_compile_definitions(katago PRIVATE COMPILE_MAX_BOARD_LEN=29)
+  set(COMPILE_MAX_BOARD_LEN 42)
 endif()
+target_compile_definitions(katago PRIVATE COMPILE_MAX_BOARD_LEN=${COMPILE_MAX_BOARD_LEN})
 
 if(NO_GIT_REVISION AND (NOT BUILD_DISTRIBUTED))
   target_compile_definitions(katago PRIVATE NO_GIT_REVISION)
@@ -441,4 +460,3 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang
 endif()
 
 target_include_directories(katago PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-

@@ -11,6 +11,8 @@
 #include "../command/commandline.h"
 #include "../main.h"
 
+#include "../external/nlohmann_json/json.hpp"
+
 #include <csignal>
 
 using namespace std;
@@ -177,6 +179,26 @@ int MainCmds::match(const vector<string>& args) {
   bool forGateKeeper = false;
   MatchPairer* matchPairer = new MatchPairer(cfg,numBots,botNames,nnEvalsByBot,paramss,forSelfPlay,forGateKeeper,excludeBot);
 
+  // Each JSON line assigns an opening and both bots to a stable output filename.
+  struct ScheduledGame {
+    string id;
+    int black, white;
+    Sgf::PositionSample position;
+  };
+  vector<ScheduledGame> schedule;
+  const bool scheduled = cfg.contains("matchScheduleFile");
+  if(scheduled) {
+    ifstream input;
+    FileUtils::open(input,cfg.getString("matchScheduleFile"));
+    string line;
+    while(getline(input,line)) {
+      auto job = nlohmann::json::parse(line);
+      schedule.push_back({job.at("id").get<string>(),job.at("black").get<int>(),job.at("white").get<int>(),
+                         Sgf::PositionSample::ofJsonLine(job.at("position").dump())});
+    }
+  }
+  std::atomic<size_t> nextScheduledGame(0);
+
   //Check for unused config keys
   cfg.warnUnusedKeys(cerr,&logger);
 
@@ -202,12 +224,13 @@ int MainCmds::match(const vector<string>& args) {
 
   auto runMatchLoop = [
     &gameRunner,&matchPairer,&sgfOutputDir,&logger,&gameSeedBase,&patternBonusTables,
-    &statsMutex, &gameCount, &timeUsedByBotMap, &movesByBotMap
+    &statsMutex, &gameCount, &timeUsedByBotMap, &movesByBotMap,
+    &schedule, &nextScheduledGame, scheduled, &botNames, &nnEvalsByBot, &paramss
   ](
     uint64_t threadHash
   ) {
     ofstream* sgfOut = NULL;
-    if(sgfOutputDir.length() > 0) {
+    if(sgfOutputDir.length() > 0 && !scheduled) {
       sgfOut = new ofstream();
       FileUtils::open(*sgfOut, sgfOutputDir + "/" + Global::uint64ToHexString(threadHash) + ".sgfs");
     }
@@ -225,20 +248,48 @@ int MainCmds::match(const vector<string>& args) {
 
       MatchPairer::BotSpec botSpecB;
       MatchPairer::BotSpec botSpecW;
-      if(matchPairer->getMatchup(botSpecB, botSpecW, logger)) {
+      const ScheduledGame* job = nullptr;
+      bool haveGame;
+      if(scheduled) {
+        size_t index = nextScheduledGame.fetch_add(1);
+        haveGame = index < schedule.size();
+        if(haveGame) {
+          job = &schedule[index];
+          auto spec = [&](int bot) {
+            return MatchPairer::BotSpec{bot,botNames[bot],nnEvalsByBot[bot],paramss[bot]};
+          };
+          botSpecB = spec(job->black);
+          botSpecW = spec(job->white);
+        }
+      }
+      else
+        haveGame = matchPairer->getMatchup(botSpecB, botSpecW, logger);
+      if(haveGame) {
         string seed = gameSeedBase + ":" + Global::uint64ToHexString(thisLoopSeedRand.nextUInt64());
         std::function<void(const MatchPairer::BotSpec&, Search*)> afterInitialization = [&patternBonusTables](const MatchPairer::BotSpec& spec, Search* search) {
           assert(spec.botIdx < patternBonusTables.size());
           search->setCopyOfExternalPatternBonusTable(patternBonusTables[spec.botIdx]);
         };
         gameData = gameRunner->runGame(
-          seed, botSpecB, botSpecW, NULL, logger,
+          seed, botSpecB, botSpecW, job == nullptr ? nullptr : &job->position, logger,
           shouldStopFunc, shouldPause, nullptr, afterInitialization, nullptr
         );
       }
 
       bool shouldContinue = gameData != NULL;
       if(gameData != NULL) {
+        if(job != nullptr && !shouldStop.load() && sgfOutputDir.length() > 0) {
+          string path = sgfOutputDir + "/" + job->id + ".sgf";
+          ofstream out;
+          FileUtils::open(out,path + ".tmp");
+          WriteSgf::writeSgf(out,gameData->bName,gameData->wName,gameData->endHist,gameData,false,true);
+          out << endl;
+          out.close();
+          if(!out)
+            throw IOError("Could not write " + path + ".tmp");
+          // A completed filename is the runner's checkpoint; partial writes stay temporary.
+          FileUtils::rename(path + ".tmp",path);
+        }
         if(sgfOut != NULL) {
           WriteSgf::writeSgf(*sgfOut,gameData->bName,gameData->wName,gameData->endHist,gameData,false,true);
           (*sgfOut) << endl;

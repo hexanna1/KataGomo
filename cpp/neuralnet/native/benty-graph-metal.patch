@@ -1,0 +1,125 @@
+--- metalbackend.cpp
++++ metalbackend.cpp
+@@ -6,6 +6,7 @@
+ #include "../neuralnet/nninterface.h"
+ #include "../neuralnet/metalbackend.h"
+ #include "../core/test.h"
++#include "benty-graph.h"
+ 
+ #include <katagocoreml/KataGoConverter.hpp>
+ #include <ghc/filesystem.hpp>
+@@ -244,7 +245,7 @@
+   SWMatMulLayerDesc outProj = matMulLayerDescToSwift(&desc->outProj);
+   float* ropeFreqs = desc->ropeFreqs.empty() ? nullptr : (float*)desc->ropeFreqs.data();
+ 
+-  return createSWTransformerAttentionBlockDesc(
++  auto descriptor = createSWTransformerAttentionBlockDesc(
+     desc->numHeads,
+     desc->numKVHeads,
+     desc->qHeadDim,
+@@ -260,6 +261,15 @@
+     desc->ropeNumPairs,
+     ropeFreqs,
+     desc->ropeTheta);
++  if(desc->graphAttention) {
++    for(int tensorLen = 7; tensorLen <= COMPILE_MAX_BOARD_LEN; tensorLen += 6) {
++      const auto& geometry = BentYGraph::geometry(tensorLen);
++      vector<int32_t> points(geometry.points.begin(), geometry.points.end());
++      auto bias = desc->computeGraphBias(tensorLen);
++      addSWTransformerGraphGeometry(descriptor, tensorLen, (int32_t)points.size(), points.data(), bias.data());
++    }
++  }
++  return descriptor;
+ }
+ 
+ /// Convert a transformer FFN block description from C++ to Swift
+--- metallayers.swift
++++ metallayers.swift
+@@ -1063,6 +1063,11 @@
+         postConv: postConv)
+ }
+ 
++struct GraphAttentionGeometry {
++    let points: [Int]
++    let bias: [Float32]
++}
++
+ public class SWTransformerAttentionBlockDesc: BlockDescriptor {
+     let numHeads: Int
+     let numKVHeads: Int
+@@ -1079,6 +1084,7 @@
+     let ropeNumPairs: Int
+     let ropeFreqs: UnsafeMutablePointer<Float32>?  // learnable: (numKVHeads, numPairs, 2) flattened
+     let ropeTheta: Float
++    var graphGeometry: [Int: GraphAttentionGeometry]?
+ 
+     init(
+         numHeads: Int,
+@@ -1113,6 +1119,21 @@
+         self.ropeFreqs = ropeFreqs
+         self.ropeTheta = ropeTheta
+     }
++}
++
++public func addSWTransformerGraphGeometry(
++    descriptor: SWTransformerAttentionBlockDesc,
++    width: Int32,
++    numPoints: Int32,
++    points: UnsafeMutablePointer<Int32>,
++    bias: UnsafeMutablePointer<Float32>
++) {
++    let count = Int(numPoints)
++    let geometry = GraphAttentionGeometry(
++        points: Array(UnsafeBufferPointer(start: points, count: count)).map { Int($0) },
++        bias: Array(UnsafeBufferPointer(start: bias, count: descriptor.numHeads * count * count)))
++    if descriptor.graphGeometry == nil { descriptor.graphGeometry = [:] }
++    descriptor.graphGeometry![Int(width)] = geometry
+ }
+ 
+ public func createSWTransformerAttentionBlockDesc(
+@@ -1380,7 +1401,12 @@
+         // Build the bias in FP32 before casting, preserving zeroes at valid keys.
+         precondition(dataType == .float32, "attention mask bias must be constructed in FP32")
+         let big = graph.constant(1.0e9, dataType: dataType)
+-        let keyBias = graph.multiplication(graph.subtraction(maskSeq, one, name: nil), big, name: nil)
++        var keyBias = graph.multiplication(graph.subtraction(maskSeq, one, name: nil), big, name: nil)
++        if let geometries = descriptor.graphGeometry {
++            let graphBias = BentYSequence.attentionBias(graph: graph, geometries: geometries,
++                width: spatialWidth ?? nnX, tokens: seq, heads: numHeads, mask: maskTensor)
++            keyBias = graph.addition(keyBias, graphBias, name: nil)
++        }
+         let computeType: MPSDataType = useFP16 ? .float16 : .float32
+         let queryTensor = graph.cast(qh, to: computeType, name: nil)
+         let keyTensor = graph.cast(khExp, to: computeType, name: nil)
+@@ -1865,9 +1891,16 @@
+         packY: Bool,
+         useFP16Convs: Bool = false
+     ) {
+-        let packed = packY && nnXLen.intValue == nnYLen.intValue && !blockDescriptors.isEmpty
+-            && blockDescriptors.allSatisfy { $0 is SWTransformerAttentionBlockDesc || $0 is SWTransformerFFNBlockDesc }
+-        let sequence = packed ? YTriangleSequence(width: nnXLen.intValue) : nil
++        let graphGeometries = blockDescriptors.compactMap { $0 as? SWTransformerAttentionBlockDesc }
++            .first?.graphGeometry
++        let packed = graphGeometries != nil || (packY && nnXLen.intValue == nnYLen.intValue && !blockDescriptors.isEmpty
++            && blockDescriptors.allSatisfy { $0 is SWTransformerAttentionBlockDesc || $0 is SWTransformerFFNBlockDesc })
++        let sequence: (any PackedBoardSequence)?
++        if let geometries = graphGeometries {
++            sequence = BentYSequence.make(graph: graph, width: nnXLen.intValue, geometries: geometries, mask: maskTensor)
++        } else {
++            sequence = packed ? YTriangleSequence(width: nnXLen.intValue) : nil
++        }
+         let computeInput = sequence?.gather(graph, sourceTensor) ?? sourceTensor
+         let computeMask = sequence?.gather(graph, maskTensor) ?? maskTensor
+         let computeWidth = sequence.map { $0.points.count as NSNumber } ?? nnXLen
+@@ -2168,6 +2201,11 @@
+     init(width: Int) {
+         self.width = width
+         points = (0..<width).flatMap { y in (0..<(width - y)).map { x in y * width + x } }
++    }
++
++    init(width: Int, points: [Int]) {
++        self.width = width
++        self.points = points
+     }
+ 
+     func indices(_ graph: MPSGraph, _ values: [Int]) -> MPSGraphTensor {

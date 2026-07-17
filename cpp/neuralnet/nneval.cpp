@@ -12,6 +12,7 @@ NNResultBuf::NNResultBuf()
     hasResult(false),
     boardXSizeForServer(0),
     boardYSizeForServer(0),
+    boardShapeForServer(Board::DEFAULT_SHAPE),
     rowSpatialSize(0),
     rowGlobalSize(0),
     rowSpatial(NULL),
@@ -509,19 +510,18 @@ void NNEvaluator::serve(
       }
 
       for(int row = 0; row<numRows; row++) {
+        int numSymmetries = SymmetryHelpers::numSymmetries(buf.resultBufs[row]->boardShapeForServer);
         if(buf.resultBufs[row]->symmetry == NNInputs::SYMMETRY_NOTSPECIFIED) {
           if(doRandomize)
-            buf.resultBufs[row]->symmetry = rand.nextUInt(SymmetryHelpers::NUM_SYMMETRIES);
+            buf.resultBufs[row]->symmetry = rand.nextUInt(numSymmetries);
           else {
-            assert(defaultSymmetry >= 0 && defaultSymmetry <= SymmetryHelpers::NUM_SYMMETRIES-1);
+            assert(defaultSymmetry >= 0 && defaultSymmetry < numSymmetries);
             buf.resultBufs[row]->symmetry = defaultSymmetry;
           }
         }
-        //transpose if player is white
-        if(buf.resultBufs[row]->pla == P_WHITE)
-          buf.resultBufs[row]->symmetry ^= 0x4;
-        else 
-          assert(buf.resultBufs[row]->pla == P_BLACK);
+        if(buf.resultBufs[row]->boardShapeForServer == BoardShape::Hex && buf.resultBufs[row]->pla == P_WHITE)
+          buf.resultBufs[row]->symmetry ^= SymmetryHelpers::HEX_TRANSPOSE;
+        assert(buf.resultBufs[row]->pla == P_BLACK || buf.resultBufs[row]->pla == P_WHITE);
       }
 
       NeuralNet::getOutput(gpuHandle, buf.inputBuffers, numRows, buf.resultBufs, outputBuf);
@@ -622,6 +622,7 @@ void NNEvaluator::evaluate(
 
   buf.boardXSizeForServer = board.x_size;
   buf.boardYSizeForServer = board.y_size;
+  buf.boardShapeForServer = board.shape;
 
   MiscNNInputParams nnInputParamsWithResultsBeforeNN = nnInputParams;
   nnInputParamsWithResultsBeforeNN.resultsBeforeNN.init(board, history, nextPlayer);
@@ -751,7 +752,7 @@ void NNEvaluator::evaluate(
         for(int x = 0; x < board.x_size; x++) {
           double dx = lastMoveX - x;
           double dy = lastMoveY - y;
-          double dist = sqrt(dx * dx + dy * dy + dx * dy);//distance on Hex board
+          double dist = sqrt(dx * dx + dy * dy + dx * dy);//distance on the triangular hex grid
           double factor = -log(1 + dist * plfDistInv);
           factor *= nnInputParams.policyLocalFocusPow;
           int pos = NNPos::xyToPos(x, y, nnXLen);

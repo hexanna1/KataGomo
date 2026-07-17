@@ -10,7 +10,6 @@ import time
 import logging
 import zipfile
 import shutil
-import psutil
 import json
 import hashlib
 import datetime
@@ -19,6 +18,11 @@ import gc
 import multiprocessing
 
 import numpy as np
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 keys = [
     "binaryInputNCHWPacked",
@@ -43,6 +47,8 @@ def joint_shuffle_take_first_n(n,arrs):
     return shuffled_arrs
 
 def memusage_mb():
+    if psutil is None:
+        return -1
     return psutil.Process(os.getpid()).memory_info().rss // 1048576
 
 def shardify(input_idx, input_file_group, num_out_files, out_tmp_dirs, keep_prob):
@@ -247,12 +253,12 @@ def get_numpy_npz_headers(filename):
         for subfilename in z.namelist():
             npyfile = z.open(subfilename)
             try:
-                version = np.lib.format.read_magic(npyfile)
+                np.lib.format.read_magic(npyfile)
             except ValueError:
                 wasbad = True
                 print("WARNING: bad file, skipping it: %s (bad array %s)" % (filename,subfilename))
             else:
-                (shape, is_fortran, dtype) = np.lib.format._read_array_header(npyfile,version)
+                (shape, is_fortran, dtype) = np.lib.format.read_array_header_1_0(npyfile)
                 npzheaders[subfilename] = (shape, is_fortran, dtype)
         if wasbad:
             return None
@@ -535,10 +541,6 @@ if __name__ == '__main__':
     with TimeStuff("Sorting"):
         all_files.sort(key=(lambda x: x[1]), reverse=False)
 
-    # Wait a few seconds just in case to limit the chance of filesystem races, now that we know exactly
-    # the set of filenames we want
-    time.sleep(3)
-
     with TimeStuff("Computing rows for unsummarized files"):
         with multiprocessing.Pool(num_processes) as pool:
             results = pool.map(compute_num_rows,files_with_unknown_num_rows)
@@ -646,35 +648,6 @@ if __name__ == '__main__':
     del all_files
     gc.collect()
 
-    np.random.seed()
-    np.random.shuffle(desired_input_files)
-
-    approx_rows_to_keep = num_rows_used
-    if keep_target_rows is not None:
-        approx_rows_to_keep = min(approx_rows_to_keep, keep_target_rows)
-    keep_prob = approx_rows_to_keep / num_rows_used
-
-    num_out_files = int(round(approx_rows_to_keep / approx_rows_per_out_file))
-    num_out_files = max(num_out_files,1)
-
-    if output_npz:
-        out_files = [os.path.join(out_dir, "data%d.npz" % i) for i in range(num_out_files)]
-    else:
-        assert False, "No longer supports outputting tensorflow data"
-
-    out_tmp_dirs = [os.path.join(out_tmp_dir, "tmp.shuf%d" % i) for i in range(num_out_files)]
-    print("Writing %d output files with %d kept / %d desired rows" % (num_out_files, approx_rows_to_keep, desired_num_rows), flush=True)
-
-    def clean_tmp_dirs():
-        for tmp_dir in out_tmp_dirs:
-            if os.path.exists(tmp_dir):
-                print("Cleaning up tmp dir: " + tmp_dir)
-                shutil.rmtree(tmp_dir)
-
-    clean_tmp_dirs()
-    for tmp_dir in out_tmp_dirs:
-        os.mkdir(tmp_dir)
-
     num_rows_in_desired_files = 0
     if only_include_md5_path_prop_lbound is not None or only_include_md5_path_prop_ubound is not None:
         new_desired_input_files = []
@@ -701,6 +674,35 @@ if __name__ == '__main__':
     if num_rows_in_desired_files <= 0:
         print("No rows in desired files")
         sys.exit(0)
+
+    np.random.seed()
+    np.random.shuffle(desired_input_files)
+
+    approx_rows_to_keep = num_rows_in_desired_files
+    if keep_target_rows is not None:
+        approx_rows_to_keep = min(approx_rows_to_keep, keep_target_rows)
+    keep_prob = approx_rows_to_keep / num_rows_in_desired_files
+
+    num_out_files = int(round(approx_rows_to_keep / approx_rows_per_out_file))
+    num_out_files = max(num_out_files,1)
+
+    if output_npz:
+        out_files = [os.path.join(out_dir, "data%d.npz" % i) for i in range(num_out_files)]
+    else:
+        assert False, "No longer supports outputting tensorflow data"
+
+    out_tmp_dirs = [os.path.join(out_tmp_dir, "tmp.shuf%d" % i) for i in range(num_out_files)]
+    print("Writing %d output files with %d kept / %d eligible rows" % (num_out_files, approx_rows_to_keep, num_rows_in_desired_files), flush=True)
+
+    def clean_tmp_dirs():
+        for tmp_dir in out_tmp_dirs:
+            if os.path.exists(tmp_dir):
+                print("Cleaning up tmp dir: " + tmp_dir)
+                shutil.rmtree(tmp_dir)
+
+    clean_tmp_dirs()
+    for tmp_dir in out_tmp_dirs:
+        os.mkdir(tmp_dir)
 
     # Clump files into sharding groups. More efficient if shuffling a ton of small npz files
     # since we aren't doing separate tasks for every individual file but rather handling a bunch

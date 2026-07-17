@@ -133,7 +133,8 @@ int MainCmds::genbook(const vector<string>& args) {
   const int numToExpandPerIteration = cfg.getInt("numToExpandPerIteration",1,10000000);
 
   std::map<BookHash,double> bonusByHash;
-  Board bonusInitialBoard(boardSizeX,boardSizeY);
+  const BoardShape boardShape = cfg.contains("boardShape") ? BoardShapeIO::parse(cfg.getString("boardShape")) : Board::DEFAULT_SHAPE;
+  Board bonusInitialBoard(boardSizeX,boardSizeY,boardShape);
   Player bonusInitialPla = P_BLACK;
   if(bonusFile != "") {
     Sgf* sgf = Sgf::loadFile(bonusFile);
@@ -164,12 +165,12 @@ int MainCmds::genbook(const vector<string>& args) {
             logger.write("Adding bonus " + Global::doubleToString(bonus) + " to hash " + hashRet.toString());
           }
         }
-      }
+      }, boardShape
     );
 
     XYSize xySize = sgf->getXYSize();
-    if(boardSizeX != xySize.x || boardSizeY != xySize.y)
-      throw StringError("Board size in config does not match the board size of the bonus file");
+    if(boardSizeX != xySize.x || boardSizeY != xySize.y || boardShape != sgf->getBoardShape(boardShape))
+      throw StringError("Board size or shape in config does not match the bonus file");
     vector<Move> placements;
     sgf->getPlacements(placements,boardSizeX,boardSizeY);
     bool suc = bonusInitialBoard.setStones(placements);
@@ -219,6 +220,7 @@ int MainCmds::genbook(const vector<string>& args) {
     if(
       boardSizeX != book->getInitialHist().getRecentBoard(0).x_size ||
       boardSizeY != book->getInitialHist().getRecentBoard(0).y_size ||
+      boardShape != book->getInitialHist().initialBoard.shape ||
       rules != book->getInitialHist().rules
     ) {
       throw StringError("Book parameters do not match");
@@ -545,9 +547,9 @@ int MainCmds::genbook(const vector<string>& args) {
         lock.unlock();
 
         // To avoid oddities in positions where the rules mismatch, expand every move with a noticeably higher raw policy
-        // Average all 8 symmetries
+        // Average all board symmetries
         vector<std::shared_ptr<NNOutput>> ptrs;
-        for(int sym = 0; sym<SymmetryHelpers::NUM_SYMMETRIES; sym++) {
+        for(int sym = 0; sym<SymmetryHelpers::numSymmetries(board.shape); sym++) {
           MiscNNInputParams nnInputParams;
           nnInputParams.symmetry = sym;
           NNResultBuf buf;

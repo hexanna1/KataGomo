@@ -86,6 +86,7 @@ int MainCmds::analysis(const vector<string>& args) {
     return 1;
   }
   cfg.applyAlias("numSearchThreadsPerAnalysisThread", "numSearchThreads");
+  const BoardShape boardShape = cfg.contains("boardShape") ? BoardShapeIO::parse(cfg.getString("boardShape")) : Board::DEFAULT_SHAPE;
 
   if(cfg.contains("numAnalysisThreads") && numAnalysisThreadsCmdlineSpecified)
     throw StringError("When specifying numAnalysisThreads in the config (" + cfg.getFileName() + "), it is redundant and disallowed to also specify it via -analysis-threads");
@@ -608,7 +609,13 @@ int MainCmds::analysis(const vector<string>& args) {
         boardYSize = (int)yBuf;
       }
 
-      auto parseBoardLocs = [boardXSize,boardYSize,&rbase,&reportErrorForId](const json& dict, const char* field, vector<Loc>& buf, bool allowPass) {
+      if(!Board::isValidSizeForShape(boardXSize,boardYSize,boardShape)) {
+        reportErrorForId(rbase.id, "boardXSize", "Board dimensions are not valid for boardShape " + BoardShapeIO::toString(boardShape));
+        continue;
+      }
+      Board board(boardXSize,boardYSize,boardShape);
+
+      auto parseBoardLocs = [&board,&rbase,&reportErrorForId](const json& dict, const char* field, vector<Loc>& buf, bool allowPass) {
         buf.clear();
         if(!dict[field].is_array()) {
           reportErrorForId(rbase.id, field, "Must be an array of GTP board vertices");
@@ -626,7 +633,7 @@ int MainCmds::analysis(const vector<string>& args) {
           }
 
           Loc loc;
-          if(!Location::tryOfString(s, boardXSize, boardYSize, loc) ||
+          if(!Location::tryOfString(s, board, loc) ||
              (!allowPass && loc == Board::PASS_LOC) ||
              (loc == Board::NULL_LOC)) {
             reportErrorForId(rbase.id, field, "Could not parse board location: " + s);
@@ -637,7 +644,7 @@ int MainCmds::analysis(const vector<string>& args) {
         return true;
       };
 
-      auto parseBoardMoves = [boardXSize,boardYSize,&rbase,&reportErrorForId](const json& dict, const char* field, vector<Move>& buf, bool allowPass) {
+      auto parseBoardMoves = [&board,&rbase,&reportErrorForId](const json& dict, const char* field, vector<Move>& buf, bool allowPass) {
         buf.clear();
         if(!dict[field].is_array()) {
           reportErrorForId(rbase.id, field, "Must be an array of pairs of the form: [\"b\" or \"w\", GTP board vertex]");
@@ -668,7 +675,7 @@ int MainCmds::analysis(const vector<string>& args) {
           }
 
           Loc loc;
-          if(!Location::tryOfString(s1, boardXSize, boardYSize, loc) ||
+          if(!Location::tryOfString(s1, board, loc) ||
              (!allowPass && loc == Board::PASS_LOC) ||
              (loc == Board::NULL_LOC)) {
             reportErrorForId(rbase.id, field, "Could not parse board location: " + s1);
@@ -945,7 +952,6 @@ int MainCmds::analysis(const vector<string>& args) {
       }
 
 
-      Board board(boardXSize,boardYSize);
       for(int i = 0; i<placements.size(); i++) {
         board.setStone(placements[i].loc,placements[i].pla);
       }

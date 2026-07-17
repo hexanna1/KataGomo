@@ -105,18 +105,27 @@ struct NNOutput {
 };
 
 namespace SymmetryHelpers {
-  //A symmetry is 3 bits flipY(bit 0), flipX(bit 1), transpose(bit 2). They are applied in that order.
-  //The first four symmetries only reflect, and do not transpose X and Y.
-  constexpr int NUM_SYMMETRIES = 2;
+  //Symmetries are indexed by the 6 permutations of the 3 shape coordinates.
+  //Yavalath uses sign-flipped odd permutations for long-diagonal reflections.
+  //Yavalath adds central inversion at indices 6-11. Hex uses 0-1
+  //for board symmetries and bit 2 for player-dependent NN transposition.
+  constexpr int NUM_SYMMETRIES = 12;
+  int numSymmetries(BoardShape shape);
 
-  //These two IGNORE transpose if hSize and wSize do not match. So non-square transposes are disallowed.
-  //copyOutputsWithSymmetry performs the inverse of symmetry.
-  void copyInputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int cSize, bool useNHWC, int symmetry);
-  void copyOutputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int symmetry);
+  constexpr int HEX_TRANSPOSE = 0x4;
+  inline bool isHexTranspose(int symmetry) { return (symmetry & HEX_TRANSPOSE) != 0; }
+  inline bool isHexRotation(int symmetry) { return (symmetry & 0x1) != 0; }
+
+  //Y-family symmetries require square tensors because Y boards are embedded in square tensors.
+  //copyOutputsWithSymmetry performs the inverse of the requested symmetry.
+  void copyInputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int cSize, bool useNHWC, int symmetry, BoardShape shape = Board::DEFAULT_SHAPE, int boardXSize = -1, int boardYSize = -1);
+  void copyOutputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int symmetry, BoardShape shape = Board::DEFAULT_SHAPE, int boardXSize = -1, int boardYSize = -1);
 
   //Applies a symmetry to a location
   Loc getSymLoc(int x, int y, const Board& board, int symmetry);
   Loc getSymLoc(Loc loc, const Board& board, int symmetry);
+  Loc getSymLoc(int x, int y, int xSize, int ySize, BoardShape shape, int symmetry);
+  Loc getSymLoc(Loc loc, int xSize, int ySize, BoardShape shape, int symmetry);
   Loc getSymLoc(int x, int y, int xSize, int ySize, int symmetry);
   Loc getSymLoc(Loc loc, int xSize, int ySize, int symmetry);
 
@@ -124,20 +133,16 @@ namespace SymmetryHelpers {
   Board getSymBoard(const Board& board, int symmetry);
 
   //Get the inverse of the specified symmetry
-  int invert(int symmetry);
+  int invert(int symmetry, BoardShape shape = Board::DEFAULT_SHAPE);
   //Get the symmetry equivalent to first applying firstSymmetry and then applying nextSymmetry.
-  int compose(int firstSymmetry, int nextSymmetry);
-  int compose(int firstSymmetry, int nextSymmetry, int nextNextSymmetry);
-
-  inline bool isTranspose(int symmetry) { return (symmetry & 0x4) != 0; }
-  inline bool isFlipX(int symmetry) { return (symmetry & 0x1) != 0; }
-  inline bool isFlipY(int symmetry) { return (symmetry & 0x1) != 0; }
+  int compose(int firstSymmetry, int nextSymmetry, BoardShape shape = Board::DEFAULT_SHAPE);
+  int compose(int firstSymmetry, int nextSymmetry, int nextNextSymmetry, BoardShape shape = Board::DEFAULT_SHAPE);
 
   //Fill isSymDupLoc with true on all but one copy of each symmetrically equivalent move, and false everywhere else.
   //isSymDupLocs should be an array of size Board::MAX_ARR_SIZE
   //If onlySymmetries is not NULL, will only consider the symmetries specified there.
   //validSymmetries will be filled with all symmetries of the current board, including using history for checking ko/superko and some encore-related state.
-  //This implementation is dependent on specific order of the symmetries (i.e. transpose is coded as 0x4)
+  //This implementation depends on the fixed order of the Y coordinate permutations.
   //Will pretend moves that have a nonzero value in avoidMoves do not exist.
   void markDuplicateMoveLocs(
     const Board& board,

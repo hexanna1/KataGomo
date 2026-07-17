@@ -129,6 +129,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
   //Parse rules -------------------------------------------------------------------
   Rules defaultRules = Rules::getTrompTaylorish();
   Player perspective = Setup::parseReportAnalysisWinrates(cfg,P_BLACK);
+  const BoardShape boardShape = cfg.contains("boardShape") ? BoardShapeIO::parse(cfg.getString("boardShape")) : Board::DEFAULT_SHAPE;
 
   //Parse sgf file and board ------------------------------------------------------------------
 
@@ -138,8 +139,8 @@ int MainCmds::evalsgf(const vector<string>& args) {
   Player nextPla;
   BoardHistory hist;
 
-  auto setUpBoardUsingRules = [&board,&nextPla,&hist,moveNum,&sgf,&extraMoves](const Rules& initialRules) {
-    sgf->setupInitialBoardAndHist(initialRules, board, nextPla, hist);
+  auto setUpBoardUsingRules = [&board,&nextPla,&hist,moveNum,&sgf,&extraMoves,boardShape](const Rules& initialRules) {
+    sgf->setupInitialBoardAndHist(initialRules, board, nextPla, hist, boardShape);
     vector<Move>& moves = sgf->moves;
 
 

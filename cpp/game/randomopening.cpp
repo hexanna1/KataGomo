@@ -1,10 +1,11 @@
 #include "../game/randomopening.h"
 #include "../game/gamelogic.h"
 #include "../core/rand.h"
+#include "../program/playutils.h"
 #include "../search/asyncbot.h"
 using namespace RandomOpening;
 
-void RandomOpening::initializeBalancedRandomOpening(
+static void initializeHexBalancedRandomOpening(
   Search* botB,
   Search* botW,
   Board& board,
@@ -12,7 +13,7 @@ void RandomOpening::initializeBalancedRandomOpening(
   Player& nextPlayer,
   Rand& gameRand,
   bool forSelfplay) {
-
+  (void)botB;
 
   double makeOpeningFairRate = forSelfplay ? 0.98 : 1.0;
   double minAcceptRate = forSelfplay ? 0.005 : 0.001;
@@ -26,7 +27,9 @@ void RandomOpening::initializeBalancedRandomOpening(
       Board boardCopy(board);
       BoardHistory histCopy(hist);
       Loc firstMove = Location::getLoc(firstx, firsty, board.x_size);
-      histCopy.makeBoardMoveAssumeLegal(boardCopy, firstMove, C_BLACK);
+      if(!histCopy.isLegal(boardCopy,firstMove,nextPlayer))
+        continue;
+      histCopy.makeBoardMoveAssumeLegal(boardCopy, firstMove, nextPlayer);
 
       NNResultBuf nnbuf;
       MiscNNInputParams nnInputParams;
@@ -50,13 +53,76 @@ void RandomOpening::initializeBalancedRandomOpening(
 
 }
 
-void RandomOpening::initializeSpecialOpening(
+void RandomOpening::initializeBalancedRandomOpening(
+  Search* botB,
+  Search* botW,
+  Board& board,
+  BoardHistory& hist,
+  Player& nextPlayer,
+  Rand& gameRand,
+  bool forSelfplay) {
+  if(board.shape == BoardShape::Hex) {
+    initializeHexBalancedRandomOpening(botB,botW,board,hist,nextPlayer,gameRand,forSelfplay);
+    return;
+  }
+
+  (void)botB;
+
+  double makeOpeningFairRate = forSelfplay ? 0.98 : 1.0;
+  double minAcceptRate = forSelfplay ? 0.005 : 0.001;
+
+  if(gameRand.nextBool(makeOpeningFairRate))  // make game fair
+  {
+    Loc firstMove = Board::NULL_LOC;
+    while(1) {
+      firstMove = Board::NULL_LOC;
+      for(int attempt = 0; attempt < 1000; attempt++) {
+        int firstx = gameRand.nextUInt(board.x_size);
+        int firsty = gameRand.nextUInt(board.y_size);
+        Loc loc = Location::getLoc(firstx, firsty, board.x_size);
+        if(board.colors[loc] == C_EMPTY) {
+          firstMove = loc;
+          break;
+        }
+      }
+      if(firstMove == Board::NULL_LOC)
+        firstMove = PlayUtils::chooseRandomLegalMove(board, hist, C_BLACK, gameRand, Board::PASS_LOC);
+      if(firstMove == Board::NULL_LOC)
+        return;
+
+      Board boardCopy(board);
+      BoardHistory histCopy(hist);
+      histCopy.makeBoardMoveAssumeLegal(boardCopy, firstMove, C_BLACK);
+
+      NNResultBuf nnbuf;
+      MiscNNInputParams nnInputParams;
+      botW->nnEvaluator->evaluate(boardCopy, histCopy, C_WHITE, nnInputParams, nnbuf, false);
+      std::shared_ptr<NNOutput> nnOutput = std::move(nnbuf.result);
+
+      double winrate = nnOutput->whiteWinProb;
+      double bias = 2 * winrate - 1;
+      double dropPow = forSelfplay ? 6.0 : 20.0;
+      double acceptRate = pow(1 - bias * bias, dropPow);
+      acceptRate = std::max(acceptRate, minAcceptRate);
+      if(gameRand.nextBool(acceptRate))
+        break;
+    }
+
+    hist.makeBoardMoveAssumeLegal(board, firstMove, nextPlayer);
+    nextPlayer = getOpp(nextPlayer);
+  }
+
+
+}
+
+static void initializeHexSpecialOpening(
   Search* botB,
   Search* botW,
   Board& board,
   BoardHistory& hist,
   Player& nextPlayer,
   Rand& gameRand) {
+  (void)botB;
   int r = gameRand.nextUInt(100);
   if (r < 10)//Gale's game
   {
@@ -118,8 +184,8 @@ void RandomOpening::initializeSpecialOpening(
 
 
     nextPlayer = gameRand.nextBool(0.2) ? C_BLACK : C_WHITE;
-  } 
-  else if(board.x_size >= 13 && r < 60)  // infinite template problem 1
+  }
+  else if(board.x_size >= 13 && board.y_size >= 4 && r < 60)  // infinite template problem 1
   {
     for(int i = 0; i < board.y_size - 1; i++) {
       int x = board.x_size - 1;
@@ -174,7 +240,7 @@ void RandomOpening::initializeSpecialOpening(
           continue;
         Board boardCopy(board);
         boardCopy.setStone(firstMove, C_WHITE);
-        BoardHistory histCopy(board, C_WHITE, hist.rules);
+        BoardHistory histCopy(boardCopy, C_WHITE, hist.rules);
 
 
         NNResultBuf nnbuf;
@@ -194,8 +260,8 @@ void RandomOpening::initializeSpecialOpening(
       board.setStone(firstMove, C_WHITE);
     }
     nextPlayer = C_WHITE;
-  } 
-  else if(board.x_size >= 25 && r < 80)  // 10th template
+  }
+  else if(board.x_size >= 25 && board.y_size >= 11 && r < 80)  // 10th template
   {
     int templateRow = 10;
     for(int i = 0; i < templateRow; i++) {
@@ -251,6 +317,28 @@ void RandomOpening::initializeSpecialOpening(
     randomFillBoard(board, gameRand, fillProb, fillProb);
     nextPlayer = gameRand.nextBool(0.5) ? C_BLACK : C_WHITE;
   }
+
+  auto rules = hist.rules;
+  hist.clear(board, nextPlayer, rules);
+}
+
+void RandomOpening::initializeSpecialOpening(
+  Search* botB,
+  Search* botW,
+  Board& board,
+  BoardHistory& hist,
+  Player& nextPlayer,
+  Rand& gameRand) {
+  if(board.shape == BoardShape::Hex) {
+    initializeHexSpecialOpening(botB,botW,board,hist,nextPlayer,gameRand);
+    return;
+  }
+  (void)botB;
+  (void)botW;
+
+  double fillProb = gameRand.nextExponential() * 0.01;
+  randomFillBoard(board, gameRand, fillProb, fillProb);
+  nextPlayer = gameRand.nextBool(0.5) ? C_BLACK : C_WHITE;
 
   auto rules = hist.rules;
   hist.clear(board, nextPlayer, rules);

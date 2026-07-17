@@ -45,7 +45,7 @@ double Search::recomputeSearchTimeLimit(
   tcRec *= searchParams.overallocateTimeFactor;
 
   if(searchParams.midgameTimeFactor != 1.0) {
-    double boardAreaScale = rootBoard.x_size * rootBoard.y_size / 361.0;
+    double boardAreaScale = rootBoard.playableArea() / 361.0;
     int64_t presumedTurnNumber = rootHistory.initialTurnNumber + rootHistory.moveHistory.size();
     if(presumedTurnNumber < 0) presumedTurnNumber = 0;
 

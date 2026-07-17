@@ -140,13 +140,11 @@ class Metrics:
 
         owned_target = torch.square(target_ownership)
         unowned_target = 1.0 - owned_target
-        unowned_proportion = torch.sum(unowned_target * mask, dim=(1, 2)) / (1.0 + mask_sum_hw)
-        unowned_proportion = torch.mean(unowned_proportion * weight)
         if is_training:
             if not skip_moving_update:
+                # Hex/Y ownership targets have zero weight, so the weighted unowned proportion is zero.
                 self.moving_unowned_proportion_sum *= 0.998
                 self.moving_unowned_proportion_weight *= 0.998
-                self.moving_unowned_proportion_sum += unowned_proportion.item()
                 self.moving_unowned_proportion_weight += 1.0
             moving_unowned_proportion = self.moving_unowned_proportion_sum / self.moving_unowned_proportion_weight
             seki_weight_scale = 8.0 * 0.005 / (0.005 + moving_unowned_proportion)
@@ -275,7 +273,7 @@ class Metrics:
         modelnorm_output = torch.zeros([],device=device,dtype=dtype)
         modelnorm_noreg = torch.zeros([],device=device,dtype=dtype)
         modelnorm_output_noreg = torch.zeros([],device=device,dtype=dtype)
-        for tensor in reg_dict["normal"]:
+        for tensor in reg_dict["normal"] + reg_dict.get("normal_attn", []):
             modelnorm_normal += torch.sum(tensor * tensor)
         for tensor in reg_dict["normal_gamma"]:
             modelnorm_normal_gamma += torch.sum(tensor * tensor)
@@ -369,6 +367,7 @@ class Metrics:
         td_value_loss_scales,
         main_loss_scale,
         intermediate_loss_scale,
+        compute_model_norms=True,
     ):
         results = self.metrics_dict_batchwise_single_heads_output(
             raw_model,
@@ -378,7 +377,8 @@ class Metrics:
             soft_policy_weight_scale=soft_policy_weight_scale,
             value_loss_scale=value_loss_scale,
             td_value_loss_scales=td_value_loss_scales,
-            is_intermediate=False
+            is_intermediate=False,
+            compute_model_norms=compute_model_norms,
         )
         if main_loss_scale is not None:
             results["loss_sum"] = main_loss_scale * results["loss_sum"]
@@ -420,6 +420,7 @@ class Metrics:
         value_loss_scale,
         td_value_loss_scales,
         is_intermediate,
+        compute_model_norms=True,
     ):
         (
             policy_logits,
@@ -786,20 +787,18 @@ class Metrics:
                 global_weight,
             )
 
-            (modelnorm_normal, modelnorm_normal_gamma, modelnorm_output, modelnorm_noreg, modelnorm_output_noreg) = self.get_model_norms(raw_model)
-
             extra_results = {
                 "wsum": weight * self.world_size,
                 "nsamp": nsamples * self.world_size,
                 "ptentr_sum": policy_target_entropy,
                 "ptsoftentr_sum": soft_policy_target_entropy,
                 "sekiweightscale_sum": seki_weight_scale * weight,
-                "norm_normal_batch": modelnorm_normal,
-                "norm_normal_gamma_batch": modelnorm_normal_gamma,
-                "norm_output_batch": modelnorm_output,
-                "norm_noreg_batch": modelnorm_noreg,
-                "norm_output_noreg_batch": modelnorm_output_noreg,
             }
+            if compute_model_norms:
+                with torch.no_grad():
+                    norms = self.get_model_norms(raw_model)
+                for name, value in zip(("normal", "normal_gamma", "output", "noreg", "output_noreg"), norms):
+                    extra_results[f"norm_{name}_batch"] = value
             for key,value in extra_results.items():
                 results[key] = value
             return results

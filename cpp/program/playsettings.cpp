@@ -25,13 +25,21 @@ PlaySettings::PlaySettings()
    forSelfPlay(false),
     normalAsymmetricPlayoutProb(0.0),
     maxAsymmetricRatio(2.0),
-   recordTimePerMove(false)
+   recordTimePerMove(false),
+   matchVisitsTemp(-1.0),
+   matchVisitsTempDecay(0.5)
 {}
 PlaySettings::~PlaySettings()
 {}
 
 PlaySettings PlaySettings::loadForMatch(ConfigParser& cfg) {
   PlaySettings playSettings;
+  playSettings.completelyRandomOpeningProb = 0.0;
+  playSettings.specialOpeningProb = 0.0;
+  if(cfg.contains("matchVisitsTemp"))
+    playSettings.matchVisitsTemp = cfg.getDouble("matchVisitsTemp",0.0,5.0);
+  if(cfg.contains("matchVisitsTempDecay"))
+    playSettings.matchVisitsTempDecay = cfg.getDouble("matchVisitsTempDecay",0.0,100.0);
   playSettings.allowResignation = cfg.getBool("allowResignation");
   playSettings.resignThreshold = cfg.getDouble("resignThreshold",-1.0,0.0); //Threshold on [-1,1], regardless of winLossUtilityFactor
   playSettings.resignConsecTurns = cfg.getInt("resignConsecTurns", 1, 100);

@@ -1,0 +1,853 @@
+--- metalbackend.cpp
++++ metalbackend.cpp
+@@ -524,10 +524,10 @@
+   (void)logger;
+   (void)homeDataDirOverride;
+   (void)loadedModel;
+-  (void)cfg;
+ 
+   ComputeContext* context = new ComputeContext(nnXLen, nnYLen, useFP16Mode);
+   context->aneOnly = aneOnly;
++  context->metalContext.setPackY(cfg.contains("packY") && cfg.getBool("packY"));
+   return context;
+ }
+ 
+@@ -690,14 +690,13 @@
+   metaEncoderVersion = modelDesc->metaEncoderVersion;
+   this->inputsUseNHWC = inputsUseNHWC;
+   this->requireExactNNLen = requireExactNNLen;
+-  // Report what this handle actually computes with. The MPSGraph (GPU) path builds its graph
+-  // entirely in FP32 regardless of useFP16Mode; the CoreML (ANE) path converts at FP16 EXCEPT
+-  // that the converter demotes narrow transformer trunks to full FP32 for accuracy - query the
+-  // converter's predicate so that case reports FP32 too. If the MPSGraph path is ever switched
+-  // to honor useFP16Mode, update this.
++  // GPU CNN convolutions or transformer matrix multiplies/attention use FP16
++  // when requested; normalization, residuals and other operations stay FP32.
++  bool hasTransformer = trunkHasTransformerBlocks(modelDesc->trunk.blocks);
+   bool aneWouldDemoteToFP32 = katagocoreml::KataGoConverter::wouldBuildFullyFp32(
+-    modelDesc->trunk.trunkNumChannels, trunkHasTransformerBlocks(modelDesc->trunk.blocks));
+-  useFP16 = (gpuIdx == METAL_MUX_ANE) && (context->useFP16Mode != enabled_t::False) && !aneWouldDemoteToFP32;
++    modelDesc->trunk.trunkNumChannels, hasTransformer);
++  useFP16 = context->useFP16Mode != enabled_t::False &&
++    (gpuIdx != METAL_MUX_ANE || !aneWouldDemoteToFP32);
+ }
+ 
+ ComputeHandle::~ComputeHandle() {
+--- metalbackend.swift
++++ metalbackend.swift
+@@ -24,6 +24,7 @@
+     public let nnXLen: Int32
+     public let nnYLen: Int32
+     public let useFP16: Bool
++    public var packY = false
+ 
+     init(nnXLen: Int32, nnYLen: Int32, useFP16: Bool) {
+         self.nnXLen = nnXLen
+@@ -430,12 +431,26 @@
+     let policyHead: PolicyHead
+     let valueHead: ValueHead
+     let targetTensors: [MPSGraphTensor]
++    // One bucket of feeds per handle; apply waits for completion before reuse.
++    private var cachedInputBatchSize = 0
++    private var cachedInputArrays: (spatial: MPSNDArray, global: MPSNDArray,
++                                    meta: MPSNDArray, mask: MPSNDArray)?
++    private var cachedFeeds: [MPSGraphTensor: MPSGraphTensorData] = [:]
++    private let executionDescriptor: MPSGraphExecutionDescriptor = {
++        let compilation = MPSGraphCompilationDescriptor()
++        compilation.optimizationLevel = .level0
++        let execution = MPSGraphExecutionDescriptor()
++        execution.compilationDescriptor = compilation
++        return execution
++    }()
+ 
+     public init?(
+         modelDesc: SWModelDesc,
+         nnXLen: Int32,
+         nnYLen: Int32,
+-        optimizeIdentityMask: Bool = false
++        optimizeIdentityMask: Bool = false,
++        useFP16: Bool,
++        packY: Bool
+     ) {
+         guard let device = MTLCreateSystemDefaultDevice() else {
+             printError("Metal backend: Failed to create Metal device")
+@@ -511,6 +526,8 @@
+                 maskSumSqrtS14M01: maskSumSqrtS14M01)
+         }
+ 
++        let useFP16Convs = useFP16
++
+         trunk = Trunk(
+             graph: graph,
+             descriptor: modelDesc.trunk,
+@@ -522,7 +539,10 @@
+             maskSumSqrtS14M01Tensor: maskSumSqrtS14M01.tensor,
+             nnXLen: nnXLenNS,
+             nnYLen: nnYLenNS,
+-            optimizeIdentityMask: optimizeIdentityMask)
++            optimizeIdentityMask: optimizeIdentityMask,
++            useFP16: useFP16,
++            packY: packY,
++            useFP16Convs: useFP16Convs)
+ 
+         policyHead = PolicyHead(
+             graph: graph,
+@@ -533,7 +553,8 @@
+             maskSumSqrtS14M01Tensor: maskSumSqrtS14M01.tensor,
+             nnXLen: nnXLenNS,
+             nnYLen: nnYLenNS,
+-            optimizeIdentityMask: optimizeIdentityMask)
++            optimizeIdentityMask: optimizeIdentityMask,
++            useFP16Convs: useFP16Convs)
+ 
+         valueHead = ValueHead(
+             graph: graph,
+@@ -545,14 +566,15 @@
+             maskSumSqrtS14M01SquareS01Tensor: maskSumSqrtS14M01SquareS01.tensor,
+             nnXLen: nnXLenNS,
+             nnYLen: nnYLenNS,
+-            optimizeIdentityMask: optimizeIdentityMask)
+-
++            optimizeIdentityMask: optimizeIdentityMask,
++            useFP16Convs: useFP16Convs)
++
++        // The tensor bridge exports policy and scalar values; ownership is unused.
+         targetTensors = [
+             policyHead.policyTensor,
+             policyHead.policyPassTensor,
+             valueHead.valueTensor,
+             valueHead.scoreValueTensor,
+-            valueHead.ownershipTensor,
+         ]
+ 
+         printError("Metal backend: MPSGraph initialized on \(device.name)\(optimizeIdentityMask ? " (mask optimized)" : "")")
+@@ -596,59 +618,64 @@
+         }
+         let commandBuffer = MPSCommandBuffer(commandBuffer: mtlCommandBuffer)
+ 
+-        // Spatial input
+-        let inputShape = InputShape.create(
+-            batchSize: batchSize as NSNumber,
+-            numChannels: numInputChannelsNS,
+-            nnYLen: nnYLenNS,
+-            nnXLen: nnXLenNS)
+-        let inputDescriptor = MPSNDArrayDescriptor(dataType: input.tensor.dataType, shape: inputShape)
+-        let inputArray = MPSNDArray(device: device, descriptor: inputDescriptor)
+-        inputArray.writeBytes(inputPointer)
+-
+-        // Global input
+-        let inputGlobalShape = InputShape.create(
+-            batchSize: batchSize as NSNumber,
+-            numChannels: numInputGlobalChannelsNS,
+-            nnYLen: 1,
+-            nnXLen: 1)
+-        let inputGlobalDescriptor = MPSNDArrayDescriptor(dataType: inputGlobal.tensor.dataType, shape: inputGlobalShape)
+-        let inputGlobalArray = MPSNDArray(device: device, descriptor: inputGlobalDescriptor)
+-        inputGlobalArray.writeBytes(inputGlobalPointer)
+-
+-        // Meta input
+-        let inputMetaShape = InputShape.create(
+-            batchSize: batchSize as NSNumber,
+-            numChannels: numInputMetaChannelsNS,
+-            nnYLen: 1,
+-            nnXLen: 1)
+-        let inputMetaDescriptor = MPSNDArrayDescriptor(dataType: inputMeta.tensor.dataType, shape: inputMetaShape)
+-        let inputMetaArray = MPSNDArray(device: device, descriptor: inputMetaDescriptor)
+-        inputMetaArray.writeBytes(inputMetaPointer)
+-
+-        // Mask (extracted from first channel of spatial input)
+-        let maskShape = InputShape.create(
+-            batchSize: batchSize as NSNumber,
+-            numChannels: 1,
+-            nnYLen: nnYLenNS,
+-            nnXLen: nnXLenNS)
+-        let maskDescriptor = MPSNDArrayDescriptor(dataType: mask.tensor.dataType, shape: maskShape)
+-        let maskArray = MPSNDArray(device: device, descriptor: maskDescriptor)
+-        maskArray.writeBytes(inputPointer, strideBytes: &maskStrideArray)
+-
+-        let feeds = [
+-            input.tensor: MPSGraphTensorData(inputArray),
+-            inputGlobal.tensor: MPSGraphTensorData(inputGlobalArray),
+-            inputMeta.tensor: MPSGraphTensorData(inputMetaArray),
+-            mask.tensor: MPSGraphTensorData(maskArray),
+-        ]
++        if cachedInputBatchSize != batchSize {
++            // Spatial input
++            let inputShape = InputShape.create(
++                batchSize: batchSize as NSNumber,
++                numChannels: numInputChannelsNS,
++                nnYLen: nnYLenNS,
++                nnXLen: nnXLenNS)
++            let inputDescriptor = MPSNDArrayDescriptor(dataType: input.tensor.dataType, shape: inputShape)
++            let inputArray = MPSNDArray(device: device, descriptor: inputDescriptor)
++
++            // Global input
++            let inputGlobalShape = InputShape.create(
++                batchSize: batchSize as NSNumber,
++                numChannels: numInputGlobalChannelsNS,
++                nnYLen: 1,
++                nnXLen: 1)
++            let inputGlobalDescriptor = MPSNDArrayDescriptor(dataType: inputGlobal.tensor.dataType, shape: inputGlobalShape)
++            let inputGlobalArray = MPSNDArray(device: device, descriptor: inputGlobalDescriptor)
++
++            // Meta input
++            let inputMetaShape = InputShape.create(
++                batchSize: batchSize as NSNumber,
++                numChannels: numInputMetaChannelsNS,
++                nnYLen: 1,
++                nnXLen: 1)
++            let inputMetaDescriptor = MPSNDArrayDescriptor(dataType: inputMeta.tensor.dataType, shape: inputMetaShape)
++            let inputMetaArray = MPSNDArray(device: device, descriptor: inputMetaDescriptor)
++
++            // Mask (extracted from first channel of spatial input)
++            let maskShape = InputShape.create(
++                batchSize: batchSize as NSNumber,
++                numChannels: 1,
++                nnYLen: nnYLenNS,
++                nnXLen: nnXLenNS)
++            let maskDescriptor = MPSNDArrayDescriptor(dataType: mask.tensor.dataType, shape: maskShape)
++            let maskArray = MPSNDArray(device: device, descriptor: maskDescriptor)
++
++            cachedInputArrays = (inputArray, inputGlobalArray, inputMetaArray, maskArray)
++            cachedInputBatchSize = batchSize
++            cachedFeeds = [
++                input.tensor: MPSGraphTensorData(inputArray),
++                inputGlobal.tensor: MPSGraphTensorData(inputGlobalArray),
++                inputMeta.tensor: MPSGraphTensorData(inputMetaArray),
++                mask.tensor: MPSGraphTensorData(maskArray),
++            ]
++        }
++        let arrays = cachedInputArrays!
++        arrays.spatial.writeBytes(inputPointer)
++        arrays.global.writeBytes(inputGlobalPointer)
++        arrays.meta.writeBytes(inputMetaPointer)
++        arrays.mask.writeBytes(inputPointer, strideBytes: &maskStrideArray)
+ 
+         let fetch = graph.encode(
+             to: commandBuffer,
+-            feeds: feeds,
++            feeds: cachedFeeds,
+             targetTensors: targetTensors,
+             targetOperations: nil,
+-            executionDescriptor: nil)
++            executionDescriptor: executionDescriptor)
+ 
+         commandBuffer.commit()
+         commandBuffer.waitUntilCompleted()
+@@ -670,7 +697,6 @@
+         readOrDie(policyHead.policyPassTensor, policyPass, "policyPass")
+         readOrDie(valueHead.valueTensor, value, "value")
+         readOrDie(valueHead.scoreValueTensor, scoreValue, "scoreValue")
+-        readOrDie(valueHead.ownershipTensor, ownership, "ownership")
+       }
+     }
+ }
+@@ -686,7 +712,9 @@
+         modelDesc: modelDesc,
+         nnXLen: context.nnXLen,
+         nnYLen: context.nnYLen,
+-        optimizeIdentityMask: requireExactNNLen
++        optimizeIdentityMask: requireExactNNLen,
++        useFP16: context.useFP16,
++        packY: context.packY
+     ) else {
+         printError("Metal backend \(serverThreadIdx): Failed to create MPSGraph handle")
+         return nil
+--- metallayers.swift
++++ metallayers.swift
+@@ -570,7 +570,8 @@
+         sourceTensor: MPSGraphTensor,
+         descriptor: SWConvLayerDesc,
+         nnXLen: NSNumber,
+-        nnYLen: NSNumber
++        nnYLen: NSNumber,
++        useFP16: Bool = false
+     ) {
+         assert(descriptor.dilationX == 1 && descriptor.dilationY == 1)
+ 
+@@ -590,11 +591,16 @@
+             shape: weightsShape,
+             dataType: sourceTensor.dataType)
+ 
+-        resultTensor = graph.convolution2D(
+-            sourceTensor,
+-            weights: weightsTensor,
+-            descriptor: convDescriptor,
+-            name: nil)
++        if useFP16 {
++            let input = graph.cast(sourceTensor, to: .float16, name: nil)
++            let weights = graph.cast(weightsTensor, to: .float16, name: nil)
++            let convolution = graph.convolution2D(
++                input, weights: weights, descriptor: convDescriptor, name: nil)
++            resultTensor = graph.cast(convolution, to: .float32, name: nil)
++        } else {
++            resultTensor = graph.convolution2D(
++                sourceTensor, weights: weightsTensor, descriptor: convDescriptor, name: nil)
++        }
+ 
+         assert(resultTensor.shape?.count == 4)
+     }
+@@ -692,7 +698,8 @@
+     init(
+         graph: MPSGraph,
+         descriptor: SWMatMulLayerDesc,
+-        sourceTensor: MPSGraphTensor
++        sourceTensor: MPSGraphTensor,
++        useFP16: Bool = false
+     ) {
+         let weightsShape = [
+             descriptor.inChannels,
+@@ -706,7 +713,7 @@
+         let weightsTensor = graph.constant(
+             weightsData,
+             shape: weightsShape,
+-            dataType: sourceTensor.dataType)
++            dataType: .float32)
+ 
+         let shape = [-1, descriptor.inChannels]
+ 
+@@ -715,10 +722,14 @@
+             shape: shape,
+             name: nil)
+ 
+-        resultTensor = graph.matrixMultiplication(
+-            primary: reshapedSource,
+-            secondary: weightsTensor,
+-            name: nil)
++        if useFP16 {
++            let input = graph.cast(reshapedSource, to: .float16, name: nil)
++            let weights = graph.cast(weightsTensor, to: .float16, name: nil)
++            let product = graph.matrixMultiplication(primary: input, secondary: weights, name: nil)
++            resultTensor = graph.cast(product, to: .float32, name: nil)
++        } else {
++            resultTensor = graph.matrixMultiplication(primary: reshapedSource, secondary: weightsTensor, name: nil)
++        }
+ 
+         assert(resultTensor.shape?.count == 2)
+     }
+@@ -1301,7 +1312,10 @@
+         maskTensor: MPSGraphTensor,
+         descriptor: SWTransformerAttentionBlockDesc,
+         nnXLen: NSNumber,
+-        nnYLen: NSNumber
++        nnYLen: NSNumber,
++        useFP16: Bool,
++        spatialIndices: [Int]?,
++        spatialWidth: Int?
+     ) {
+         let dataType = sourceTensor.dataType
+         let numHeads = descriptor.numHeads
+@@ -1323,9 +1337,9 @@
+         let normedNHWC = graph.transpose(normed, permutation: [0, 2, 3, 1], name: nil)
+ 
+         // 2. Q/K/V projections via matmul over channels -> [B*seq, heads*dim]
+-        let q = MatMulLayer(graph: graph, descriptor: descriptor.qProj, sourceTensor: normedNHWC).resultTensor
+-        let k = MatMulLayer(graph: graph, descriptor: descriptor.kProj, sourceTensor: normedNHWC).resultTensor
+-        let v = MatMulLayer(graph: graph, descriptor: descriptor.vProj, sourceTensor: normedNHWC).resultTensor
++        let q = MatMulLayer(graph: graph, descriptor: descriptor.qProj, sourceTensor: normedNHWC, useFP16: useFP16).resultTensor
++        let k = MatMulLayer(graph: graph, descriptor: descriptor.kProj, sourceTensor: normedNHWC, useFP16: useFP16).resultTensor
++        let v = MatMulLayer(graph: graph, descriptor: descriptor.vProj, sourceTensor: normedNHWC, useFP16: useFP16).resultTensor
+ 
+         // 3. reshape to [B, heads, seq, dim]
+         var qh = TransformerAttentionBlock.toHeads(graph, q, seq: seq, numHeads: numHeads, headDim: qHeadDim)
+@@ -1338,11 +1352,13 @@
+             // Q heads map to KV heads via kvh = h * numKVHeads / numHeads (matches Eigen).
+             let (qCos, qSin) = TransformerAttentionBlock.makeRopeTables(
+                 graph, descriptor: descriptor, nHeads: numHeads, seq: seq, numPairs: numPairs,
+-                nnX: nnX, nnY: nnY, qHeadDim: qHeadDim,
++                nnX: spatialWidth ?? nnX, nnY: nnY, qHeadDim: qHeadDim,
++                spatialIndices: spatialIndices,
+                 kvIndexForHead: { h in (h * numKVHeads) / numHeads })
+             let (kCos, kSin) = TransformerAttentionBlock.makeRopeTables(
+                 graph, descriptor: descriptor, nHeads: numKVHeads, seq: seq, numPairs: numPairs,
+-                nnX: nnX, nnY: nnY, qHeadDim: qHeadDim,
++                nnX: spatialWidth ?? nnX, nnY: nnY, qHeadDim: qHeadDim,
++                spatialIndices: spatialIndices,
+                 kvIndexForHead: { h in h })
+             qh = TransformerAttentionBlock.applyRope(graph, qh, cosT: qCos, sinT: qSin,
+                                                      numHeads: numHeads, seq: seq, numPairs: numPairs)
+@@ -1359,38 +1375,28 @@
+             vhExp = TransformerAttentionBlock.repeatKVHeads(graph, vh, numKVHeads: numKVHeads, groupSize: groupSize)
+         }
+ 
+-        // 5. scores = scale * Q @ K^T -> [B, heads, seq, seq]
+-        let khT = graph.transpose(khExp, permutation: [0, 1, 3, 2], name: nil)
+-        var scores = graph.matrixMultiplication(primary: qh, secondary: khT, name: nil)
+-        let scale = graph.constant(1.0 / Double(qHeadDim).squareRoot(), dataType: dataType)
+-        scores = graph.multiplication(scores, scale, name: nil)
+-
+-        // Mask keys: add (maskKey - 1) * BIG so masked key columns get ~ -inf before softmax.
+-        // maskTensor [B,1,H,W] -> [B,1,1,seq]; the flat element order is already b, y, x so a
+-        // direct reshape suffices.
+         let maskSeq = graph.reshape(maskTensor, shape: [-1, 1, 1, seq as NSNumber], name: nil)
+         let one = graph.constant(1.0, dataType: dataType)
+-        // This graph is FP32-only, where 1e9 is safe. If this path ever gains an FP16 mode, this
+-        // constant must shrink to an FP16-safe magnitude (e.g. 3e4, as the CoreML MIL builder
+-        // uses): 1e9 overflows FP16 to +inf, and (mask - 1) * inf = 0 * inf = NaN at every
+-        // valid key, poisoning the softmax. The precondition makes that switch fail loudly here.
+-        precondition(dataType == .float32, "attention mask bias magnitude 1e9 is only safe in FP32")
++        // Build the bias in FP32 before casting, preserving zeroes at valid keys.
++        precondition(dataType == .float32, "attention mask bias must be constructed in FP32")
+         let big = graph.constant(1.0e9, dataType: dataType)
+         let keyBias = graph.multiplication(graph.subtraction(maskSeq, one, name: nil), big, name: nil)
+-        scores = graph.addition(scores, keyBias, name: nil)
+-
+-        // 6. softmax over key axis (last)
+-        let attn = graph.softMax(with: scores, axis: 3, name: nil)
+-
+-        // 7. out = attn @ V -> [B, heads, seq, vHeadDim]
+-        let attnOut = graph.matrixMultiplication(primary: attn, secondary: vhExp, name: nil)
++        let computeType: MPSDataType = useFP16 ? .float16 : .float32
++        let queryTensor = graph.cast(qh, to: computeType, name: nil)
++        let keyTensor = graph.cast(khExp, to: computeType, name: nil)
++        let valueTensor = graph.cast(vhExp, to: computeType, name: nil)
++        let attentionMask = graph.cast(keyBias, to: computeType, name: nil)
++        let attention = graph.scaledDotProductAttention(
++            query: queryTensor, key: keyTensor, value: valueTensor, mask: attentionMask,
++            scale: Float(1.0 / Double(qHeadDim).squareRoot()), name: nil)
++        let attnOut = graph.cast(attention, to: .float32, name: nil)
+ 
+         // 8. back to [B*seq, heads*vHeadDim]
+         let outHeadsLast = graph.transpose(attnOut, permutation: [0, 2, 1, 3], name: nil)  // [B,seq,heads,vHeadDim]
+         let outFlat = graph.reshape(outHeadsLast, shape: [-1, (numHeads * vHeadDim) as NSNumber], name: nil)
+ 
+         // 9. output projection -> [B*seq, C]
+-        let proj = MatMulLayer(graph: graph, descriptor: descriptor.outProj, sourceTensor: outFlat).resultTensor
++        let proj = MatMulLayer(graph: graph, descriptor: descriptor.outProj, sourceTensor: outFlat, useFP16: useFP16).resultTensor
+ 
+         // 10. reshape to NHWC then NCHW
+         let outChannels = descriptor.outProj.outChannels
+@@ -1445,7 +1451,7 @@
+     /// Build RoPE cos/sin constant tensors of shape [1, nHeads, seq, numPairs].
+     static func makeRopeTables(_ graph: MPSGraph, descriptor: SWTransformerAttentionBlockDesc,
+                                nHeads: Int, seq: Int, numPairs: Int, nnX: Int, nnY: Int, qHeadDim: Int,
+-                               kvIndexForHead: (Int) -> Int) -> (MPSGraphTensor, MPSGraphTensor) {
++                               spatialIndices: [Int]?, kvIndexForHead: (Int) -> Int) -> (MPSGraphTensor, MPSGraphTensor) {
+         // desc.cpp validates that learnable-rope models always carry frequencies; without this check
+         // a nil pointer would silently fall through to the fixed-theta branch with theta=0 (NaN tables).
+         precondition(!descriptor.learnableRope || descriptor.ropeFreqs != nil,
+@@ -1461,8 +1467,9 @@
+         for h in 0..<nHeads {
+             let kvh = kvIndexForHead(h)
+             for xy in 0..<seq {
+-                let y = xy / nnX
+-                let x = xy % nnX
++                let point = spatialIndices?[xy] ?? xy
++                let y = point / nnX
++                let x = point % nnX
+                 for p in 0..<numPairs {
+                     var angle: Float = 0
+                     if descriptor.learnableRope, let freqs = descriptor.ropeFreqs {
+@@ -1506,7 +1513,8 @@
+         maskTensor: MPSGraphTensor,
+         descriptor: SWTransformerFFNBlockDesc,
+         nnXLen: NSNumber,
+-        nnYLen: NSNumber
++        nnYLen: NSNumber,
++        useFP16: Bool
+     ) {
+         let numChannels = descriptor.numChannels
+ 
+@@ -1523,15 +1531,15 @@
+         let normedNHWC = graph.transpose(normed, permutation: [0, 2, 3, 1], name: nil)
+ 
+         // 2. linear1 + gate, both [B*seq, ffnChannels]
+-        let a = MatMulLayer(graph: graph, descriptor: descriptor.linear1, sourceTensor: normedNHWC).resultTensor
+-        let gate = MatMulLayer(graph: graph, descriptor: descriptor.linearGate, sourceTensor: normedNHWC).resultTensor
++        let a = MatMulLayer(graph: graph, descriptor: descriptor.linear1, sourceTensor: normedNHWC, useFP16: useFP16).resultTensor
++        let gate = MatMulLayer(graph: graph, descriptor: descriptor.linearGate, sourceTensor: normedNHWC, useFP16: useFP16).resultTensor
+ 
+         // 3. SwiGLU: SiLU(a) * gate, SiLU(a) = a * sigmoid(a)
+         let siluA = graph.multiplication(a, graph.sigmoid(with: a, name: nil), name: nil)
+         let h = graph.multiplication(siluA, gate, name: nil)
+ 
+         // 4. linear2 -> [B*seq, numChannels]
+-        let out = MatMulLayer(graph: graph, descriptor: descriptor.linear2, sourceTensor: h).resultTensor
++        let out = MatMulLayer(graph: graph, descriptor: descriptor.linear2, sourceTensor: h, useFP16: useFP16).resultTensor
+ 
+         // 5. reshape to NHWC then NCHW, masked residual
+         let outNHWC = graph.reshape(out, shape: [-1, nnYLen, nnXLen, numChannels as NSNumber], name: nil)
+@@ -1554,7 +1562,8 @@
+         descriptor: SWResidualBlockDesc,
+         nnXLen: NSNumber,
+         nnYLen: NSNumber,
+-        optimizeIdentityMask: Bool = false
++        optimizeIdentityMask: Bool = false,
++        useFP16Convs: Bool = false
+     ) {
+         let preBN = BatchNormLayer(
+             graph: graph,
+@@ -1575,7 +1584,8 @@
+             sourceTensor: preActivation.resultTensor,
+             descriptor: descriptor.regularConv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         let midBN = BatchNormLayer(
+             graph: graph,
+@@ -1596,7 +1606,8 @@
+             sourceTensor: midActivation.resultTensor,
+             descriptor: descriptor.finalConv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         resultTensor = graph.addition(
+             sourceTensor,
+@@ -1620,7 +1631,8 @@
+         descriptor: SWGlobalPoolingResidualBlockDesc,
+         nnXLen: NSNumber,
+         nnYLen: NSNumber,
+-        optimizeIdentityMask: Bool = false
++        optimizeIdentityMask: Bool = false,
++        useFP16Convs: Bool = false
+     ) {
+         let maskSum = MaskSumLayer(tensor: maskSumTensor)
+         let maskSumSqrtS14M01 = MaskSumSqrtS14M01Layer(tensor: maskSumSqrtS14M01Tensor)
+@@ -1644,14 +1656,16 @@
+             sourceTensor: preActivation.resultTensor,
+             descriptor: descriptor.regularConv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         let gpoolConv = ConvLayer(
+             graph: graph,
+             sourceTensor: preActivation.resultTensor,
+             descriptor: descriptor.gpoolConv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         let gpoolBN = BatchNormLayer(
+             graph: graph,
+@@ -1709,7 +1723,8 @@
+             sourceTensor: midActivation.resultTensor,
+             descriptor: descriptor.finalConv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         resultTensor = graph.addition(
+             sourceTensor,
+@@ -1734,7 +1749,12 @@
+         _ index: Int,
+         _ nnXLen: NSNumber,
+         _ nnYLen: NSNumber,
+-        _ optimizeIdentityMask: Bool
++        _ optimizeIdentityMask: Bool,
++        _ useFP16: Bool,
++        _ packY: Bool,
++        _ spatialIndices: [Int]?,
++        _ spatialWidth: Int?,
++        _ useFP16Convs: Bool
+     ) -> MPSGraphTensor {
+         guard index < blockDescriptors.count else {
+             return sourceTensor
+@@ -1754,7 +1774,8 @@
+                 descriptor: globalPoolingDescriptor,
+                 nnXLen: nnXLen,
+                 nnYLen: nnYLen,
+-                optimizeIdentityMask: optimizeIdentityMask)
++                optimizeIdentityMask: optimizeIdentityMask,
++                useFP16Convs: useFP16Convs)
+ 
+             blockInput = globalPooling.resultTensor
+         case let nestedBottleneckDescriptor as SWNestedBottleneckResidualBlockDesc:
+@@ -1767,7 +1788,10 @@
+                 descriptor: nestedBottleneckDescriptor,
+                 nnXLen: nnXLen,
+                 nnYLen: nnYLen,
+-                optimizeIdentityMask: optimizeIdentityMask)
++                optimizeIdentityMask: optimizeIdentityMask,
++                useFP16: useFP16,
++                packY: packY,
++                useFP16Convs: useFP16Convs)
+ 
+             blockInput = nestedBottleneck.resultTensor
+         case let residualBlockDescriptor as SWResidualBlockDesc:
+@@ -1778,7 +1802,8 @@
+                 descriptor: residualBlockDescriptor,
+                 nnXLen: nnXLen,
+                 nnYLen: nnYLen,
+-                optimizeIdentityMask: optimizeIdentityMask)
++                optimizeIdentityMask: optimizeIdentityMask,
++                useFP16Convs: useFP16Convs)
+ 
+             blockInput = ordinary.resultTensor
+         case let attnDescriptor as SWTransformerAttentionBlockDesc:
+@@ -1788,7 +1813,9 @@
+                 maskTensor: maskTensor,
+                 descriptor: attnDescriptor,
+                 nnXLen: nnXLen,
+-                nnYLen: nnYLen)
++                nnYLen: nnYLen,
++                useFP16: useFP16,
++                spatialIndices: spatialIndices, spatialWidth: spatialWidth)
+ 
+             blockInput = attn.resultTensor
+         case let ffnDescriptor as SWTransformerFFNBlockDesc:
+@@ -1798,7 +1825,8 @@
+                 maskTensor: maskTensor,
+                 descriptor: ffnDescriptor,
+                 nnXLen: nnXLen,
+-                nnYLen: nnYLen)
++                nnYLen: nnYLen,
++                useFP16: useFP16)
+ 
+             blockInput = ffn.resultTensor
+         default:
+@@ -1817,7 +1845,10 @@
+             index + 1,
+             nnXLen,
+             nnYLen,
+-            optimizeIdentityMask)
++            optimizeIdentityMask,
++            useFP16,
++            packY, spatialIndices, spatialWidth,
++            useFP16Convs)
+     }
+ 
+     init(
+@@ -1829,19 +1860,24 @@
+         blockDescriptors: [BlockDescriptor],
+         nnXLen: NSNumber,
+         nnYLen: NSNumber,
+-        optimizeIdentityMask: Bool = false
+-    ) {
+-        resultTensor = BlockStack.processBlockDescriptors(
+-            graph,
+-            sourceTensor,
+-            maskTensor,
+-            maskSumTensor,
+-            maskSumSqrtS14M01Tensor,
+-            blockDescriptors,
+-            0,
+-            nnXLen,
+-            nnYLen,
+-            optimizeIdentityMask)
++        optimizeIdentityMask: Bool = false,
++        useFP16: Bool,
++        packY: Bool,
++        useFP16Convs: Bool = false
++    ) {
++        let packed = packY && nnXLen.intValue == nnYLen.intValue && !blockDescriptors.isEmpty
++            && blockDescriptors.allSatisfy { $0 is SWTransformerAttentionBlockDesc || $0 is SWTransformerFFNBlockDesc }
++        let sequence = packed ? YTriangleSequence(width: nnXLen.intValue) : nil
++        let computeInput = sequence?.gather(graph, sourceTensor) ?? sourceTensor
++        let computeMask = sequence?.gather(graph, maskTensor) ?? maskTensor
++        let computeWidth = sequence.map { $0.points.count as NSNumber } ?? nnXLen
++        let computeHeight: NSNumber = packed ? 1 : nnYLen
++        let output = BlockStack.processBlockDescriptors(
++            graph, computeInput, computeMask, maskSumTensor, maskSumSqrtS14M01Tensor,
++            blockDescriptors, 0, computeWidth, computeHeight, optimizeIdentityMask,
++            useFP16, packY && !packed, sequence?.points, sequence?.width,
++            useFP16Convs)
++        resultTensor = sequence?.restore(graph, output) ?? output
+     }
+ }
+ 
+@@ -1858,7 +1894,10 @@
+         descriptor: SWNestedBottleneckResidualBlockDesc,
+         nnXLen: NSNumber,
+         nnYLen: NSNumber,
+-        optimizeIdentityMask: Bool = false
++        optimizeIdentityMask: Bool = false,
++        useFP16: Bool,
++        packY: Bool,
++        useFP16Convs: Bool = false
+     ) {
+         let preBN = BatchNormLayer(
+             graph: graph,
+@@ -1879,7 +1918,8 @@
+             sourceTensor: preActivation.resultTensor,
+             descriptor: descriptor.preConv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         let blocks = BlockStack(
+             graph: graph,
+@@ -1890,7 +1930,10 @@
+             blockDescriptors: descriptor.blockDescriptors,
+             nnXLen: nnXLen,
+             nnYLen: nnYLen,
+-            optimizeIdentityMask: optimizeIdentityMask)
++            optimizeIdentityMask: optimizeIdentityMask,
++            useFP16: useFP16,
++            packY: packY,
++            useFP16Convs: useFP16Convs)
+ 
+         let postBN = BatchNormLayer(
+             graph: graph,
+@@ -1911,7 +1954,8 @@
+             sourceTensor: postActivation.resultTensor,
+             descriptor: descriptor.postConv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         resultTensor = graph.addition(
+             sourceTensor,
+@@ -2116,6 +2160,42 @@
+         trunkTipActivation: trunkTipActivation)
+ }
+ 
++// Triangle tokens retain their square-board indices for RoPE.
++struct YTriangleSequence {
++    let width: Int
++    let points: [Int]
++
++    init(width: Int) {
++        self.width = width
++        points = (0..<width).flatMap { y in (0..<(width - y)).map { x in y * width + x } }
++    }
++
++    func indices(_ graph: MPSGraph, _ values: [Int]) -> MPSGraphTensor {
++        let codes = values.map { Int32($0) }
++        let data = codes.withUnsafeBufferPointer { Data(buffer: $0) }
++        return graph.constant(data, shape: [codes.count as NSNumber], dataType: .int32)
++    }
++
++    func gather(_ graph: MPSGraph, _ source: MPSGraphTensor) -> MPSGraphTensor {
++        let channels = source.shape![1]
++        let flat = graph.reshape(source, shape: [-1, channels, (width * width) as NSNumber], name: nil)
++        let packed = graph.gather(withUpdatesTensor: flat, indicesTensor: indices(graph, points), axis: 2, batchDimensions: 0, name: nil)
++        return graph.reshape(packed, shape: [-1, channels, 1, points.count as NSNumber], name: nil)
++    }
++
++    func restore(_ graph: MPSGraph, _ source: MPSGraphTensor) -> MPSGraphTensor {
++        let channels = source.shape![1]
++        let flat = graph.reshape(source, shape: [-1, channels, points.count as NSNumber], name: nil)
++        let first = graph.sliceTensor(flat, dimension: 2, start: 0, length: 1, name: nil)
++        let zero = graph.multiplication(first, graph.constant(0.0, dataType: .float32), name: nil)
++        let padded = graph.concatTensors([flat, zero], dimension: 2, name: nil)
++        var reverse = [Int](repeating: points.count, count: width * width)
++        for (index, point) in points.enumerated() { reverse[point] = index }
++        let restored = graph.gather(withUpdatesTensor: padded, indicesTensor: indices(graph, reverse), axis: 2, batchDimensions: 0, name: nil)
++        return graph.reshape(restored, shape: [-1, channels, width as NSNumber, width as NSNumber], name: nil)
++    }
++}
++
+ /// A structure representing a ResNet trunk for a neural network
+ struct Trunk {
+     let resultTensor: MPSGraphTensor
+@@ -2166,14 +2246,18 @@
+         maskSumSqrtS14M01Tensor: MPSGraphTensor,
+         nnXLen: NSNumber,
+         nnYLen: NSNumber,
+-        optimizeIdentityMask: Bool = false
++        optimizeIdentityMask: Bool = false,
++        useFP16: Bool,
++        packY: Bool,
++        useFP16Convs: Bool = false
+     ) {
+         let initialConv = ConvLayer(
+             graph: graph,
+             sourceTensor: inputTensor,
+             descriptor: descriptor.initialConv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         let initialMatMul = MatMulLayer(
+             graph: graph,
+@@ -2206,7 +2290,10 @@
+             blockDescriptors: descriptor.blockDescriptors,
+             nnXLen: nnXLen,
+             nnYLen: nnYLen,
+-            optimizeIdentityMask: optimizeIdentityMask)
++            optimizeIdentityMask: optimizeIdentityMask,
++            useFP16: useFP16,
++            packY: packY,
++            useFP16Convs: useFP16Convs)
+ 
+         // RMSNorm trunk tip uses a fused activation; standard uses BatchNorm followed by a separate activation.
+         if descriptor.trunkNormKind == TRUNK_NORM_KIND_RMSNORM {
+@@ -2360,21 +2447,24 @@
+         maskSumSqrtS14M01Tensor: MPSGraphTensor,
+         nnXLen: NSNumber,
+         nnYLen: NSNumber,
+-        optimizeIdentityMask: Bool = false
++        optimizeIdentityMask: Bool = false,
++        useFP16Convs: Bool = false
+     ) {
+         let p1Conv = ConvLayer(
+             graph: graph,
+             sourceTensor: sourceTensor,
+             descriptor: descriptor.p1Conv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         let g1Conv = ConvLayer(
+             graph: graph,
+             sourceTensor: sourceTensor,
+             descriptor: descriptor.g1Conv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         let g1BN = BatchNormLayer(
+             graph: graph,
+@@ -2432,7 +2522,8 @@
+             sourceTensor: p1Activation.resultTensor,
+             descriptor: descriptor.p2Conv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         policyTensor = p2Conv.resultTensor
+ 
+@@ -2566,14 +2657,16 @@
+         maskSumSqrtS14M01SquareS01Tensor: MPSGraphTensor,
+         nnXLen: NSNumber,
+         nnYLen: NSNumber,
+-        optimizeIdentityMask: Bool = false
++        optimizeIdentityMask: Bool = false,
++        useFP16Convs: Bool = false
+     ) {
+         let v1Conv = ConvLayer(
+             graph: graph,
+             sourceTensor: sourceTensor,
+             descriptor: descriptor.v1Conv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         let v1BN = BatchNormLayer(
+             graph: graph,
+@@ -2639,7 +2732,8 @@
+             sourceTensor: v1Activation.resultTensor,
+             descriptor: descriptor.vOwnershipConv,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: useFP16Convs)
+ 
+         valueTensor = v3Bias.resultTensor
+         scoreValueTensor = sv3Bias.resultTensor
+@@ -2806,7 +2900,9 @@
+             maskSumTensor: maskSum.tensor,
+             maskSumSqrtS14M01Tensor: maskSumSqrtS14M01.tensor,
+             nnXLen: nnXLen,
+-            nnYLen: nnYLen)
++            nnYLen: nnYLen,
++            useFP16: false,
++            packY: false)
+ 
+         policyHead = PolicyHead(
+             graph: graph,

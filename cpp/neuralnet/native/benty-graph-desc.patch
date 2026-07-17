@@ -1,0 +1,138 @@
+--- desc.h
++++ desc.h
+@@ -285,12 +285,15 @@
+   int vHeadDim;
+   bool useRope;
+   bool learnableRope;
++  bool graphAttention;
+ 
+   TransformerRMSNormDesc preLN;
+   MatMulLayerDesc qProj;
+   MatMulLayerDesc kProj;
+   MatMulLayerDesc vProj;
+   MatMulLayerDesc outProj;
++  MatMulLayerDesc graphBiasInput;
++  MatMulLayerDesc graphBiasOutput;
+ 
+   // For learnable RoPE: (numKVHeads, numPairs, 2) flattened
+   int ropeNumKVHeads;
+@@ -301,7 +304,7 @@
+   float ropeTheta;
+ 
+   TransformerAttentionDesc();
+-  TransformerAttentionDesc(std::istream& in, bool binaryFloats);
++  TransformerAttentionDesc(std::istream& in, bool binaryFloats, bool isGraphAttention = false);
+   TransformerAttentionDesc(TransformerAttentionDesc&& other);
+ 
+   TransformerAttentionDesc(const TransformerAttentionDesc&) = delete;
+@@ -311,6 +314,9 @@
+ 
+   int64_t getNumParameters() const;
+   void releaseWeights();
++
++  // Head-major bias over the requested board's compact playable tokens.
++  std::vector<float> computeGraphBias(int tensorLen) const;
+ 
+   // Compute cos/sin tables for RoPE given board dimensions.
+   // Output tables are indexed as:
+--- desc.cpp
++++ desc.cpp
+@@ -1,4 +1,5 @@
+ #include "../neuralnet/desc.h"
++#include "benty-graph.h"
+ 
+ #include <cmath>
+ #include <fstream>
+@@ -1168,11 +1169,12 @@
+ 
+ TransformerAttentionDesc::TransformerAttentionDesc()
+   : numHeads(0), numKVHeads(0), qHeadDim(0), vHeadDim(0),
+-    useRope(false), learnableRope(false),
++    useRope(false), learnableRope(false), graphAttention(false),
+     ropeNumKVHeads(0), ropeNumPairs(0), ropeTheta(0.0f)
+ {}
+ 
+-TransformerAttentionDesc::TransformerAttentionDesc(istream& in, bool binaryFloats) {
++TransformerAttentionDesc::TransformerAttentionDesc(istream& in, bool binaryFloats, bool isGraphAttention)
++  : graphAttention(isGraphAttention) {
+   in >> name;
+   if(in.fail())
+     throw StringError(name + ": transformer attention block failed to parse name");
+@@ -1206,6 +1208,10 @@
+   kProj = MatMulLayerDesc(in, binaryFloats);
+   vProj = MatMulLayerDesc(in, binaryFloats);
+   outProj = MatMulLayerDesc(in, binaryFloats);
++  if(graphAttention) {
++    graphBiasInput = MatMulLayerDesc(in, binaryFloats);
++    graphBiasOutput = MatMulLayerDesc(in, binaryFloats);
++  }
+ 
+   if(qProj.outChannels != numHeads * qHeadDim)
+     throw StringError(name + Global::strprintf(": qProj.outChannels (%d) != numHeads*qHeadDim (%d)", qProj.outChannels, numHeads * qHeadDim));
+@@ -1268,11 +1274,14 @@
+   vHeadDim = other.vHeadDim;
+   useRope = other.useRope;
+   learnableRope = other.learnableRope;
++  graphAttention = other.graphAttention;
+   preLN = std::move(other.preLN);
+   qProj = std::move(other.qProj);
+   kProj = std::move(other.kProj);
+   vProj = std::move(other.vProj);
+   outProj = std::move(other.outProj);
++  graphBiasInput = std::move(other.graphBiasInput);
++  graphBiasOutput = std::move(other.graphBiasOutput);
+   ropeNumKVHeads = other.ropeNumKVHeads;
+   ropeNumPairs = other.ropeNumPairs;
+   ropeFreqs = std::move(other.ropeFreqs);
+@@ -1287,6 +1296,7 @@
+     kProj.getNumParameters() +
+     vProj.getNumParameters() +
+     outProj.getNumParameters() +
++    graphBiasInput.getNumParameters() + graphBiasOutput.getNumParameters() +
+     (int64_t)ropeFreqs.size();  // learnable RoPE frequencies, empty for fixed/no RoPE
+ }
+ 
+@@ -1296,7 +1306,32 @@
+   kProj.releaseWeights();
+   vProj.releaseWeights();
+   outProj.releaseWeights();
++  graphBiasInput.releaseWeights();
++  graphBiasOutput.releaseWeights();
+   std::vector<float>().swap(ropeFreqs);
++}
++
++std::vector<float> TransformerAttentionDesc::computeGraphBias(int tensorLen) const {
++  const auto& geometry = BentYGraph::geometry(tensorLen);
++  const size_t pairs = geometry.points.size()*geometry.points.size();
++  const int hidden = graphBiasInput.outChannels;
++  std::vector<float> result(numHeads*pairs,0.0f);
++  std::vector<float> encoded(hidden);
++  for(size_t pair = 0; pair < pairs; pair++) {
++    for(int channel = 0; channel < hidden; channel++) {
++      float value = 0.0f;
++      for(int feature = 0; feature < 10; feature++)
++        value += geometry.features[pair*10+feature] * graphBiasInput.weights[feature*hidden+channel];
++      encoded[channel] = value/(1.0f+std::exp(-value));
++    }
++    for(int head = 0; head < numHeads; head++) {
++      float value = 0.0f;
++      for(int channel = 0; channel < hidden; channel++)
++        value += encoded[channel] * graphBiasOutput.weights[channel*numHeads+head];
++      result[head*pairs+pair] = value;
++    }
++  }
++  return result;
+ }
+ 
+ void TransformerAttentionDesc::computeRopeCosSin(int nnXLen, int nnYLen, int paddedNNXYLen, std::vector<float>& cosTable, std::vector<float>& sinTable) const {
+@@ -1520,8 +1555,8 @@
+ 
+       blocks.emplace_back(NESTED_BOTTLENECK_BLOCK_KIND, std::move(descPtr));
+     }
+-    else if(kind == "transformer_attention_block") {
+-      unique_ptr_void descPtr = make_unique_void(new TransformerAttentionDesc(in, binaryFloats));
++    else if(kind == "transformer_attention_block" || kind == "transformer_graph_attention_block") {
++      unique_ptr_void descPtr = make_unique_void(new TransformerAttentionDesc(in, binaryFloats, kind == "transformer_graph_attention_block"));
+       TransformerAttentionDesc& desc = *((TransformerAttentionDesc*)descPtr.get());
+ 
+       if(desc.qProj.inChannels != trunkNumChannels)

@@ -1239,7 +1239,7 @@ bool Search::getAnalysisJson(
 
     Hash128 thisHash;
     Hash128 symHash;
-    for(int symmetry = 0; symmetry < SymmetryHelpers::NUM_SYMMETRIES; symmetry++) {
+    for(int symmetry = 0; symmetry < SymmetryHelpers::numSymmetries(board.shape); symmetry++) {
       Board symBoard = SymmetryHelpers::getSymBoard(board,symmetry);
       Hash128 hash = symBoard.getSitHash(rootPla);
       if(symmetry == 0) {

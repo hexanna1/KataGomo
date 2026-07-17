@@ -1,4 +1,4 @@
-
+.DS_Store
 
 *.bak
 .vs
@@ -13,21 +13,41 @@ cpp/build_opencl
 cpp/build_eigen
 cpp/out
 
-
-
-
-
-
+/build-engine/
+/build-engine-*/
+/local-*/
+/deps/
+/scripts/**/data*/
+/scripts/**/ktmp*/
+/scripts/**/backups*/
+/scripts/**/gtp_logs*/
+/scripts/**/*.py
+!/scripts/play_*.py
+/scripts/**/*.json
+/scripts/**/.gitignore
+/scripts/**/benchmarks/
+**/diagnostics/
+**/matches/
+**/runs/
+**/results*/
+/gtp_logs/
+*.md
+!/THIRD_PARTY_NOTICES.md
 
 *.[oa]
 *.exe
 *~
 __pycache__
+*.pyc
 *.h5
+*.numbers
+*.ckpt
+*.npz
+*.npy
+*.bin
+*.bin.gz
 *.log
 *.cbp
-
-tmp*.txt
 
 cpp/write
 cpp/runtests
@@ -51,11 +71,8 @@ cpp/runwrite.sh
 cpp/tests/scratch
 cpp/program/gitinfo.h
 
-
 cpp/data/
 versions/
-cpp/build
-cpp/out
 
 export_model_cuda.sh
 mixmodels.sh
@@ -79,7 +96,6 @@ out.txt
 .vscode
 
 # For VS
-.vs
 cpp/CMakeSettings.json
 
 # For cmake
@@ -88,7 +104,6 @@ CMakeFiles/
 Makefile
 cmake_install.cmake
 
-.DS_Store
 GPATH
 GRTAGS
 GTAGS
@@ -101,4 +116,3 @@ tmpsgf/
 watchgame.txt
 models/
 python/startposesupload.txt
-

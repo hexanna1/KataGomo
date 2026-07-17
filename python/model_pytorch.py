@@ -19,6 +19,8 @@ def act(activation, inplace=False):
         return torch.nn.ELU(inplace=inplace)
     if activation == "mish":
         return torch.nn.Mish(inplace=inplace)
+    if activation == "silu":
+        return torch.nn.SiLU(inplace=inplace)
     if activation == "gelu":
         return torch.nn.GELU(inplace=inplace)
     if activation == "hardswish":
@@ -31,7 +33,7 @@ def act(activation, inplace=False):
     assert False, f"Unknown activation name: {activation}"
 
 def compute_gain(activation):
-    if activation == "relu" or activation == "hardswish":
+    if activation == "relu" or activation == "hardswish" or activation == "silu":
         gain = math.sqrt(2.0)
     elif activation == "elu":
         gain = math.sqrt(1.55052)
@@ -1378,6 +1380,7 @@ class Model(torch.nn.Module):
             self.shortterm_score_error_multiplier = 150.0
 
         self.trunk_normless = "trunk_normless" in config and config["trunk_normless"]
+        self.trunk_final_rmsnorm = config.get("trunk_final_rmsnorm", False)
 
         if "has_intermediate_head" in config and config["has_intermediate_head"]:
             self.has_intermediate_head = True
@@ -1398,6 +1401,7 @@ class Model(torch.nn.Module):
         self.global_input_shape = [modelconfigs.get_num_global_input_features(config)]
 
         self.blocks = torch.nn.ModuleList()
+        self.graph_packing = None
         for block_config in self.block_kind:
             block_name = block_config[0]
             block_kind = block_config[1]
@@ -1455,6 +1459,21 @@ class Model(torch.nn.Module):
                     config=self.config,
                     activation=self.activation,
                 ))
+            elif block_kind in ("bottlenest2transformerropesg", "bottlenest3transformerropesg"):
+                from transformer import NestedBlock
+                self.blocks.append(NestedBlock(
+                    block_name, config, pos_len, config["board_shape"],
+                    config["packed_attention"], self.activation,
+                    internal_length=3 if block_kind == "bottlenest3transformerropesg" else 2,
+                ))
+            elif block_kind in ("bottlenest2transformergraphsg", "bottlenest3transformergraphsg"):
+                from benty_transformer import GraphNestedBlock, GraphPacking
+                if self.graph_packing is None:
+                    self.graph_packing = GraphPacking(pos_len)
+                self.blocks.append(GraphNestedBlock(
+                    block_name, config, pos_len, self.activation,
+                    internal_length=3 if block_kind == "bottlenest3transformergraphsg" else 2,
+                ))
             elif block_kind == "bottlenest3":
                 self.blocks.append(NestedBottleneckResBlock(
                     name=block_name,
@@ -1480,7 +1499,12 @@ class Model(torch.nn.Module):
             else:
                 assert False, f"Unknown block kind: {block_config[1]}"
 
-        if self.trunk_normless:
+        if self.trunk_final_rmsnorm:
+            from transformer import RMSNormMask
+            self.norm_trunkfinal = RMSNormMask(
+                self.c_trunk, spatial=config.get("trunk_rmsnorm_spatial", False),
+            )
+        elif self.trunk_normless:
             self.norm_trunkfinal = BiasMask(self.c_trunk, self.config, is_after_batchnorm=True)
         else:
             self.norm_trunkfinal = NormMask(self.c_trunk, self.config, fixup_use_gamma=False, is_last_batchnorm=True)
@@ -1562,6 +1586,8 @@ class Model(torch.nn.Module):
         reg_dict["output"] = []
         reg_dict["noreg"] = []
         reg_dict["output_noreg"] = []
+        if self.config.get("separate_attention_decay", False):
+            reg_dict["normal_attn"] = []
 
         reg_dict["normal"].append(self.conv_spatial.weight)
         reg_dict["normal"].append(self.linear_global.weight)
@@ -1605,6 +1631,10 @@ class Model(torch.nn.Module):
     def forward(self, input_spatial, input_global):
         # float_formatter = "{:.3f}".format
         # np.set_printoptions(formatter={'float_kind':float_formatter}, threshold=1000000, linewidth=10000)
+
+        if self.graph_packing is not None:
+            spatial_size = input_spatial.shape[-2:]
+            input_spatial, graph_shape = self.graph_packing.pack(input_spatial)
 
         mask = input_spatial[:, 0:1, :, :].contiguous()
         mask_sum_hw = torch.sum(mask,dim=(2,3),keepdim=True)
@@ -1657,7 +1687,10 @@ class Model(torch.nn.Module):
                 out = block(out, mask=mask, mask_sum_hw=mask_sum_hw, mask_sum=mask_sum)
                 count += 1
 
-        out = self.norm_trunkfinal(out, mask=mask, mask_sum=mask_sum)
+        if self.trunk_final_rmsnorm:
+            out = self.norm_trunkfinal(out, mask=mask, mask_sum_hw=mask_sum_hw, mask_sum=mask_sum)
+        else:
+            out = self.norm_trunkfinal(out, mask=mask, mask_sum=mask_sum)
         out = self.act_trunkfinal(out)
 
         # print("MAIN")
@@ -1674,7 +1707,7 @@ class Model(torch.nn.Module):
         ) = self.value_head(out, mask=mask, mask_sum_hw=mask_sum_hw, mask_sum=mask_sum, input_global=input_global)
 
         if self.has_intermediate_head:
-            return (
+            outputs = (
                 (
                     out_policy,
                     out_value,
@@ -1699,7 +1732,7 @@ class Model(torch.nn.Module):
                 ),
             )
         else:
-            return ((
+            outputs = ((
                 out_policy,
                 out_value,
                 out_miscvalue,
@@ -1710,6 +1743,10 @@ class Model(torch.nn.Module):
                 out_seki,
                 out_scorebelief_logprobs,
             ),)
+
+        if self.graph_packing is not None:
+            return self.graph_packing.unpack(outputs, graph_shape, spatial_size)
+        return outputs
 
     def float32ify_output(self, outputs_byheads):
         return tuple(self.float32ify_single_heads_output(outputs) for outputs in outputs_byheads)

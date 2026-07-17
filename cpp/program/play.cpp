@@ -50,11 +50,15 @@ void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
   if(allowedScoringRules.size() <= 0)
     throw IOError("scoringRules must have at least one value in " + cfg.getFileName());
 
+  boardShape = cfg.contains("boardShape") ? BoardShapeIO::parse(cfg.getString("boardShape")) : Board::DEFAULT_SHAPE;
+  logger.write("Using board shape " + BoardShapeIO::toString(boardShape));
 
   allowedBSizes = cfg.getInts("bSizes", 2, Board::MAX_LEN);
   allowedBSizeRelProbs = cfg.getDoubles("bSizeRelProbs",0.0,1e100);
 
   allowRectangleProb = cfg.contains("allowRectangleProb") ? cfg.getDouble("allowRectangleProb",0.0,1.0) : 0.0;
+  if(allowRectangleProb > 0.0 && boardShape != BoardShape::Hex)
+    throw IOError("allowRectangleProb is not supported for " + BoardShapeIO::toString(boardShape) + " boardShape in " + cfg.getFileName());
 
   auto generateCumProbs = [](const vector<Sgf::PositionSample> poses, double lambda, double& effectiveSampleSize) {
     int minInitialTurnNumber = 0;
@@ -126,7 +130,7 @@ void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
           bool hashComments = false;
           bool hashParent = false;
           bool allowGameOver = false;
-          sgf->iterAllUniquePositions(uniqueHashes, hashComments, hashParent, allowGameOver, NULL, posHandler);
+          sgf->iterAllUniquePositions(uniqueHashes, hashComments, hashParent, allowGameOver, NULL, posHandler, boardShape);
         }
       }
       catch(const StringError& e) {
@@ -203,6 +207,10 @@ void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
     throw IOError("bSizes must have at least one value in " + cfg.getFileName());
   if(allowedBSizes.size() != allowedBSizeRelProbs.size())
     throw IOError("bSizes and bSizeRelProbs must have same number of values in " + cfg.getFileName());
+  for(int bSize: allowedBSizes) {
+    if(!Board::isValidSizeForShape(bSize, bSize, boardShape))
+      throw IOError("bSize " + Global::intToString(bSize) + " is not valid for boardShape " + BoardShapeIO::toString(boardShape) + " in " + cfg.getFileName());
+  }
 
   minBoardXSize = allowedBSizes[0];
   minBoardYSize = allowedBSizes[0];
@@ -290,6 +298,8 @@ bool GameInitializer::isAllowedBSize(int xSize, int ySize) {
     return false;
   if(!contains(allowedBSizes,ySize))
     return false;
+  if(!Board::isValidSizeForShape(xSize,ySize,boardShape))
+    return false;
   if(allowRectangleProb <= 0.0 && xSize != ySize)
     return false;
   return true;
@@ -330,6 +340,8 @@ void GameInitializer::createGameSharedUnsynchronized(
   OtherGameProperties& otherGameProps,
   const Sgf::PositionSample* startPosSample
 ) {
+  otherGameProps.hasCompleteOpening = !playSettings.forSelfPlay && startPosSample != nullptr;
+
   if(initialPosition != NULL) {
     board = initialPosition->board;
     hist = initialPosition->hist;
@@ -401,14 +413,15 @@ void GameInitializer::createGameSharedUnsynchronized(
     int ySize = allowedBSizes[ySizeIdx];
 
     if(rand.nextBool(moveLimitProb)) {
-      //int maxMoves = int(pow(rand.nextDouble(), moveLimitAreaPow) * xSize * ySize);
+      int boardArea = Board(xSize,ySize,boardShape).playableArea();
+      //int maxMoves = int(pow(rand.nextDouble(), moveLimitAreaPow) * boardArea);
 
       //shortest win ~ 0.60*x^1.9
       //low draw rate ~ 0.70*x^1.9
-      double maxMovesD = 0.65 * pow(xSize * ySize, 0.95);
+      double maxMovesD = 0.65 * pow(boardArea, 0.95);
       double mmStdev = rand.nextBool(0.2) ? 2.0 * xSize : 0.7 * xSize;
       int maxMoves = int(maxMovesD + mmStdev * rand.nextGaussian());
-      if(maxMoves >= xSize * ySize)
+      if(maxMoves >= boardArea)
         maxMoves = 0;
       if(maxMoves < xSize)
         maxMoves = 0;
@@ -416,7 +429,7 @@ void GameInitializer::createGameSharedUnsynchronized(
     }
 
 
-    board = Board(xSize,ySize);
+    board = Board(xSize,ySize,boardShape);
     pla = P_BLACK;
     hist.clear(board,pla,rules);
 
@@ -1266,7 +1279,7 @@ FinishedGameData* Play::runGame(
   bool thisGameAllowResignation = playSettings.allowResignation &&
                                   ((!(playSettings.forSelfPlay)) || gameRand.nextBool(playSettings.selfplayResignProb));
   
-  bool gameInited = false;
+  bool gameInited = otherGameProps.hasCompleteOpening;
 
   // special opening
   if(!gameInited) {
@@ -1305,7 +1318,7 @@ FinishedGameData* Play::runGame(
   if(board.numStonesOnBoard() >= hist.rules.maxMoves)
     hist.rules.maxMoves = 0;
 
-  if(playSettings.initGamesWithPolicy && otherGameProps.allowPolicyInit) {
+  if(playSettings.initGamesWithPolicy && otherGameProps.allowPolicyInit && !otherGameProps.hasCompleteOpening) {
     double avgPolicyInitMoveNum =
       otherGameProps.isSgfPos ? playSettings.startPosesPolicyInitAvgMoveNum : playSettings.policyInitAvgMoveNum;
     if(avgPolicyInitMoveNum > 0) {
@@ -1352,6 +1365,12 @@ FinishedGameData* Play::runGame(
       break;
 
     Search* toMoveBot = pla == P_BLACK ? botB : botW;
+
+    if(playSettings.matchVisitsTemp >= 0.0) {
+      double temperature = playSettings.matchVisitsTemp / pow(1 + i / 2, playSettings.matchVisitsTempDecay);
+      toMoveBot->searchParams.chosenMoveTemperatureEarly = temperature;
+      toMoveBot->searchParams.chosenMoveTemperature = temperature;
+    }
 
     SearchLimitsThisMove limits = getSearchLimitsThisMove(
       toMoveBot,
@@ -1477,7 +1496,7 @@ FinishedGameData* Play::runGame(
     //Check for resignation
     if(playSettings.allowResignation && thisGameAllowResignation && historicalMctsWinLossValues.size() >= playSettings.resignConsecTurns) {
       //Play at least some moves no matter what
-      int minTurnForResignation = 1 + board.x_size * board.y_size / 10;
+      int minTurnForResignation = 1 + board.playableArea() / 10;
       if(i >= minTurnForResignation) {
         if(playSettings.resignThreshold > 0 || std::isnan(playSettings.resignThreshold))
           throw StringError("playSettings.resignThreshold > 0 || std::isnan(playSettings.resignThreshold)");
@@ -1569,7 +1588,7 @@ FinishedGameData* Play::runGame(
       assert(rawNNValues.size() == gameData->targetWeightByTurn.size());
       valueSurpriseByTurn.resize(rawNNValues.size());
 
-      int boardArea = board.x_size * board.y_size;
+      int boardArea = board.playableArea();
       double nowFactor = 1.0/(1.0 + boardArea * 0.016);
 
       double winValue = whiteValueTargetsByTurn[whiteValueTargetsByTurn.size()-1].win;

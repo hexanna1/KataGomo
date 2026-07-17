@@ -62,11 +62,17 @@ if __name__ == "__main__":
     optional_args.add_argument('-initial-checkpoint', help='If no training checkpoint exists, initialize from this checkpoint', required=False)
 
     required_args.add_argument('-pos-len', help='Spatial edge length of expected training data, e.g. 19 for 19x19 Go', type=int, required=True)
+    optional_args.add_argument('-board-shape', help='Board geometry: hex, y, bentY, or yavalath', default='y', required=False)
     required_args.add_argument('-batch-size', help='Per-GPU batch size to use for training', type=int, required=True)
     optional_args.add_argument('-samples-per-epoch', help='Number of data samples to consider as one epoch', type=int, required=False)
     optional_args.add_argument('-model-kind', help='String name for what model config to use', required=False)
+    optional_args.add_argument("-use-muon", help="Use hzy-style Muon with auxiliary Adam and no Lookahead", action="store_true")
+    optional_args.add_argument('-muon-warmup-samples', help='Ramp Muon LR from one tenth to full rate over this many samples', type=int, default=0)
+    optional_args.add_argument('-muon-weight-decay', help='Trunk Muon weight decay, with group multipliers; overrides the norm-dependent default', type=float)
     optional_args.add_argument('-lr-scale', help='LR multiplier on the hardcoded schedule', type=float, required=False)
-    optional_args.add_argument('-lr-scale-auto', help='LR auto scaling', required=False, action='store_true')
+    optional_args.add_argument('-lr-scale-auto', help='Sample-count LR scaling: 4/2/1/0.5 at 0.5M/1.5M/3M samples', required=False, action='store_true')
+    optional_args.add_argument('-lr-scale-schedule', help='Sample-count LR scales, e.g. 0:4,500000:2,1500000:1,3000000:0.5')
+    optional_args.add_argument('-lr-warmup-samples', help='Ramp LR from one tenth to full rate over this many samples', type=int)
     optional_args.add_argument('-gnorm-clip-scale', help='Multiplier on gradient clipping threshold', type=float, required=False)
     optional_args.add_argument('-sub-epochs', help='Reload training data up to this many times per epoch', type=int, default=1, required=False)
     optional_args.add_argument('-swa-period-samples', help='How frequently to average an SWA sample, in samples', type=float, required=False)
@@ -76,7 +82,9 @@ if __name__ == "__main__":
     optional_args.add_argument('-lookahead-print', help='Only print on lookahead syncs', required=False, action='store_true')
 
     optional_args.add_argument('-multi-gpus', help='Use multiple gpus, comma-separated device ids', required=False)
+    optional_args.add_argument('-device', help='Training device: auto, cuda, mps, or cpu', default='auto', required=False)
     optional_args.add_argument('-use-fp16', help='Use fp16 training', required=False, action='store_true')
+    optional_args.add_argument('-no-compile', help='Disable compiled MPS training', action='store_true')
 
     optional_args.add_argument('-epochs-per-export', help='Export model once every this many epochs', type=int, required=False)
     optional_args.add_argument('-export-prob', help='Export model with this probablity', type=float, required=False)
@@ -144,11 +152,19 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
     initial_checkpoint = args["initial_checkpoint"]
 
     pos_len = args["pos_len"]
+    board_shape = data_processing_pytorch.normalize_board_shape(args["board_shape"])
     batch_size = args["batch_size"]
     samples_per_epoch = args["samples_per_epoch"]
     model_kind = args["model_kind"]
+    use_muon = args["use_muon"]
+    muon_weight_decay = args["muon_weight_decay"]
+    muon_warmup_samples = args["muon_warmup_samples"]
     lr_scale = args["lr_scale"]
     lr_scale_auto = args["lr_scale_auto"]
+    lr_scale_schedule = ([(int(samples), float(scale)) for samples, scale in
+                          (point.split(':') for point in args['lr_scale_schedule'].split(','))]
+                         if args['lr_scale_schedule'] else None)
+    lr_warmup_samples = args['lr_warmup_samples']
     gnorm_clip_scale = args["gnorm_clip_scale"]
     sub_epochs = args["sub_epochs"]
     swa_period_samples = args["swa_period_samples"]
@@ -158,6 +174,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
     lookahead_print = args["lookahead_print"]
 
     use_fp16 = args["use_fp16"]
+    device_arg = args["device"].lower()
 
     epochs_per_export = args["epochs_per_export"]
     export_prob = args["export_prob"]
@@ -204,7 +221,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
         swa_scale = 8
 
     assert lookahead_alpha > 0.0 and lookahead_alpha <= 1.0
-    if lookahead_alpha >= 1.0:  # 1.0 means to disable lookahead optimizer
+    if use_muon or lookahead_alpha >= 1.0:  # 1.0 means to disable lookahead optimizer
         lookahead_alpha = None
         lookahead_k = None
 
@@ -239,34 +256,59 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
     # FIGURE OUT MULTIGPU ------------------------------------------------------------
     if world_size > 1:
+        if device_arg not in ("auto", "cuda"):
+            raise ValueError("Multi-GPU training is only supported with CUDA")
         multiprocessing_setup(rank, world_size)
         atexit.register(multiprocessing_cleanup)
         assert torch.cuda.is_available()
 
-    if True or torch.cuda.is_available():
+    has_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+
+    if device_arg == "auto":
+        if torch.cuda.is_available():
+            device_arg = "cuda"
+        elif has_mps:
+            device_arg = "mps"
+        else:
+            device_arg = "cpu"
+
+    if device_arg == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA requested but torch.cuda.is_available() is false")
         my_gpu_id = multi_gpu_device_ids[rank]
         torch.cuda.set_device(my_gpu_id)
         logging.info("Using GPU device: " + torch.cuda.get_device_name())
         device = torch.device("cuda", my_gpu_id)
-    else:
-        logging.warning("WARNING: No GPU, using CPU")
+    elif device_arg == "mps":
+        if not has_mps:
+            raise ValueError("MPS requested but torch.backends.mps.is_available() is false")
+        logging.info("Using MPS device")
+        device = torch.device("mps")
+    elif device_arg == "cpu":
+        logging.warning("WARNING: Using CPU")
         device = torch.device("cpu")
+    else:
+        raise ValueError("Unknown -device value: " + device_arg)
+
+    if use_fp16 and device.type != "cuda":
+        raise ValueError("-use-fp16 is currently only supported with CUDA training")
 
     # LOAD MODEL ---------------------------------------------------------------------
 
     def lr_scale_auto_factor(train_state):
+        if lr_scale_schedule:
+            return next(scale for samples, scale in reversed(lr_scale_schedule)
+                        if train_state['global_step_samples'] >= samples)
         if not lr_scale_auto:
             return 1.0
 
-        if train_state["global_step_samples"] < 60000000:
-            return 8.0
-        if train_state["global_step_samples"] < 110000000:
+        if train_state["global_step_samples"] < 500000:
             return 4.0
-        if train_state["global_step_samples"] < 160000000:
+        if train_state["global_step_samples"] < 1500000:
             return 2.0
-        if train_state["global_step_samples"] < 200000000:
+        if train_state["global_step_samples"] < 3000000:
             return 1.0
-        return 0.25
+        return 0.5
 
     def get_checkpoint_path():
         return os.path.join(traindir,"checkpoint.ckpt")
@@ -294,7 +336,6 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             if path is not None:
                 logging.info("Saving checkpoint: " + path)
                 torch.save(state_dict, path + ".tmp")
-                time.sleep(1)
                 os.replace(path + ".tmp", path)
             else:
                 logging.info("Saving checkpoint: " + get_checkpoint_path())
@@ -308,6 +349,16 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
     def get_weight_decay(raw_model, lr_scale, warmup_scale, train_state, running_metrics, group_name):
         lr_scale *= lr_scale_auto_factor(train_state)
+        if use_muon:
+            factor = {"normal": 1.0, "normal_attn": 0.5, "normal_gamma": 0.1, "output": 0.25, "noreg": 0.001, "output_noreg": 0.001}[group_name]
+            if muon_weight_decay is not None:
+                return factor * muon_weight_decay
+            if raw_model.get_norm_kind() in ("fixup", "fixscale"):
+                return (3e-10 if group_name in ("noreg", "output_noreg") else 3e-8) * world_size * batch_size / 256.0
+            rate = 6e-6 * lr_scale * math.sqrt(batch_size * world_size)
+            return factor * batch_size * world_size / (rate * 1e7 * lr_scale ** -2)
+        if group_name == "normal_attn":
+            group_name = "normal"
         if raw_model.get_norm_kind() == "fixup" or raw_model.get_norm_kind() == "fixscale":
             if group_name == "normal" or group_name == "normal_gamma" or group_name == "output":
                 return 0.000001 * world_size * batch_size / 256.0
@@ -365,6 +416,12 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             "weight_decay": get_weight_decay(raw_model, lr_scale, warmup_scale=1.0, train_state=train_state, running_metrics=running_metrics, group_name="normal"),
             "group_name": "normal",
         })
+        if reg_dict.get("normal_attn"):
+            param_groups.append({
+                "params": reg_dict["normal_attn"],
+                "weight_decay": get_weight_decay(raw_model, lr_scale, warmup_scale=1.0, train_state=train_state, running_metrics=running_metrics, group_name="normal_attn"),
+                "group_name": "normal_attn",
+            })
         if len(reg_dict["normal_gamma"]) > 0:
             param_groups.append({
                 "params": reg_dict["normal_gamma"],
@@ -387,9 +444,16 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             "group_name": "output_noreg",
         })
         num_params = len(list(raw_model.parameters()))
-        num_reg_dict_params = len(reg_dict["normal"]) + len(reg_dict["normal_gamma"]) + len(reg_dict["output"]) + len(reg_dict["noreg"]) + len(reg_dict["output_noreg"])
+        num_reg_dict_params = sum(len(params) for params in reg_dict.values())
         assert num_params == num_reg_dict_params, "Reg dict does not have entries for all params in model"
         return param_groups
+
+    def make_optimizer(raw_model, train_state, running_metrics):
+        groups = get_param_groups(raw_model, train_state, running_metrics)
+        if use_muon:
+            from muon_optimizer import Muon
+            return Muon(groups)
+        return torch.optim.SGD(groups, lr=1.0, momentum=0.9)
 
     def load():
         if not os.path.exists(get_checkpoint_path()):
@@ -400,10 +464,10 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
             if initial_checkpoint is not None:
                 if os.path.exists(initial_checkpoint):
-                    logging.info("Using initial checkpoint: {initial_checkpoint}")
+                    logging.info(f"Using initial checkpoint: {initial_checkpoint}")
                     path_to_load_from = initial_checkpoint
                 else:
-                    raise Exception("No preexisting checkpoint found, initial checkpoint provided is invalid: {initial_checkpoint}")
+                    raise Exception(f"No preexisting checkpoint found, initial checkpoint provided is invalid: {initial_checkpoint}")
             else:
                 path_to_load_from = None
         else:
@@ -442,11 +506,11 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                 train_state["modelnorm_normal_baseline"] = modelnorm_normal_baseline
                 logging.info(f"Model norm normal baseline computed: {modelnorm_normal_baseline}")
 
-            optimizer = torch.optim.SGD(get_param_groups(raw_model,train_state,running_metrics), lr=1.0, momentum=0.9)
+            optimizer = make_optimizer(raw_model, train_state, running_metrics)
 
             return (model_config, ddp_model, raw_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics)
         else:
-            state_dict = torch.load(path_to_load_from, map_location=device)
+            state_dict = torch.load(path_to_load_from, map_location=device, weights_only=False)
             model_config = state_dict["config"] if "config" in state_dict else modelconfigs.config_of_name[model_kind]
             logging.info(str(model_config))
             raw_model = Model(model_config,pos_len)
@@ -504,7 +568,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             else:
                 logging.info("WARNING: Running metrics not found in state dict, using fresh last val metrics")
 
-            optimizer = torch.optim.SGD(get_param_groups(raw_model,train_state,running_metrics), lr=1.0, momentum=0.9)
+            optimizer = make_optimizer(raw_model, train_state, running_metrics)
             if "optimizer" in state_dict:
                 optimizer.load_state_dict(state_dict["optimizer"])
             else:
@@ -513,6 +577,14 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             return (model_config, ddp_model, raw_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics)
 
     (model_config, ddp_model, raw_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics) = load()
+
+    training_forward = ddp_model
+    if device.type == "mps" and model_config["norm_kind"] == "fixscaleonenorm" and not args["no_compile"]:
+        training_forward = torch.compile(raw_model, dynamic=False, options={
+            "layout_optimization": False,
+            "max_fusion_unique_io_buffers": 24,
+        })
+        logging.info("Using compiled MPS training forward")
 
 
     if "global_step_samples" not in train_state:
@@ -554,6 +626,13 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
     logging.info(f"swa_period_samples {swa_period_samples}")
     logging.info(f"swa_scale {swa_scale}")
+    logging.info("optimizer Muon" if use_muon else "optimizer SGD")
+    if lr_scale_schedule:
+        logging.info(f"lr_scale_schedule {lr_scale_schedule}")
+    if lr_warmup_samples is not None:
+        logging.info(f"lr_warmup_samples {lr_warmup_samples}")
+    if use_muon:
+        logging.info(f"muon_warmup_samples {muon_warmup_samples}")
     logging.info(f"lookahead_alpha {lookahead_alpha}")
     logging.info(f"lookahead_k {lookahead_k}")
     logging.info(f"soft_policy_weight_scale {soft_policy_weight_scale}")
@@ -589,45 +668,54 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
     def update_and_return_lr_and_wd():
         per_sample_lr = 0.00003 * lr_scale * lr_scale_auto_factor(train_state)
+        if use_muon:
+            per_sample_lr = 6e-6 * lr_scale * lr_scale_auto_factor(train_state) * math.sqrt(batch_size * world_size)
 
-        # Warmup for initial training
         warmup_scale = 1.0
-        if model_config["norm_kind"] == "fixup" or model_config["norm_kind"] == "fixscale" or model_config["norm_kind"] == "fixscaleonenorm":
-            if train_state["global_step_samples"] < 1000000:
-                warmup_scale = 1.0 / 5.0
-            elif train_state["global_step_samples"] < 2000000:
-                warmup_scale = 1.0 / 3.0
-            elif train_state["global_step_samples"] < 4000000:
-                warmup_scale = 1.0 / 2.0
-            elif train_state["global_step_samples"] < 6000000:
-                warmup_scale = 1.0 / 1.4
-        elif model_config["norm_kind"] == "bnorm" or model_config["norm_kind"] == "brenorm" or model_config["norm_kind"] == "fixbrenorm":
-            if train_state["global_step_samples"] < 250000:
-                warmup_scale = 1.0 / 20.0
-            elif train_state["global_step_samples"] < 500000:
-                warmup_scale = 1.0 / 14.0
-            elif train_state["global_step_samples"] < 750000:
-                warmup_scale = 1.0 / 10.0
-            elif train_state["global_step_samples"] < 1000000:
-                warmup_scale = 1.0 / 7.0
-            elif train_state["global_step_samples"] < 1250000:
-                warmup_scale = 1.0 / 5.0
-            elif train_state["global_step_samples"] < 1500000:
-                warmup_scale = 1.0 / 3.0
-            elif train_state["global_step_samples"] < 1750000:
-                warmup_scale = 1.0 / 2.0
-            elif train_state["global_step_samples"] < 2000000:
-                warmup_scale = 1.0 / 1.4
-            else:
-                warmup_scale = 1.0 / 1.0
+        if lr_warmup_samples is not None:
+            progress = min(1.0, train_state['global_step_samples'] / lr_warmup_samples) if lr_warmup_samples else 1.0
+            warmup_scale = 0.1 + 0.9 * progress
+        elif use_muon:
+            if muon_warmup_samples > 0:
+                progress = min(1.0, train_state["global_step_samples"] / muon_warmup_samples)
+                warmup_scale = 0.1 + 0.9 * progress
         else:
-            assert False
+            if model_config["norm_kind"] == "fixup" or model_config["norm_kind"] == "fixscale" or model_config["norm_kind"] == "fixscaleonenorm":
+                if train_state["global_step_samples"] < 1000000:
+                    warmup_scale = 1.0 / 5.0
+                elif train_state["global_step_samples"] < 2000000:
+                    warmup_scale = 1.0 / 3.0
+                elif train_state["global_step_samples"] < 4000000:
+                    warmup_scale = 1.0 / 2.0
+                elif train_state["global_step_samples"] < 6000000:
+                    warmup_scale = 1.0 / 1.4
+            elif model_config["norm_kind"] == "bnorm" or model_config["norm_kind"] == "brenorm" or model_config["norm_kind"] == "fixbrenorm":
+                if train_state["global_step_samples"] < 250000:
+                    warmup_scale = 1.0 / 20.0
+                elif train_state["global_step_samples"] < 500000:
+                    warmup_scale = 1.0 / 14.0
+                elif train_state["global_step_samples"] < 750000:
+                    warmup_scale = 1.0 / 10.0
+                elif train_state["global_step_samples"] < 1000000:
+                    warmup_scale = 1.0 / 7.0
+                elif train_state["global_step_samples"] < 1250000:
+                    warmup_scale = 1.0 / 5.0
+                elif train_state["global_step_samples"] < 1500000:
+                    warmup_scale = 1.0 / 3.0
+                elif train_state["global_step_samples"] < 1750000:
+                    warmup_scale = 1.0 / 2.0
+                elif train_state["global_step_samples"] < 2000000:
+                    warmup_scale = 1.0 / 1.4
+                else:
+                    warmup_scale = 1.0 / 1.0
+            else:
+                assert False
 
         normal_weight_decay = 0.0
 
         for param_group in optimizer.param_groups:
             group_name = param_group["group_name"]
-            if group_name == "normal":
+            if group_name in ("normal", "normal_attn"):
                 group_scale = 1.0
             elif group_name == "normal_gamma":
                 group_scale = 1.0
@@ -639,6 +727,9 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                 group_scale = 0.5
             else:
                 assert False
+
+            if use_muon and group_name in ("noreg", "output_noreg"):
+                group_scale = 0.2
 
             # For lookahead optimizer, use weight decay appropriate for lr scale,
             # but tell optimizer to take larger steps so as to maintain the same
@@ -837,7 +928,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             if batches_to_use_so_far + num_batches_this_file > num_batches_per_subepoch:
                 # If we're going over the desired amount, randomly skip the file with probability equal to the
                 # proportion of batches over - this makes it so that in expectation, we have the desired number of batches
-                if batches_to_use_so_far > 0 and random.random() >= (batches_to_use_so_far + num_batches_this_file - num_batches_per_subepoch) / num_batches_this_file:
+                if batches_to_use_so_far > 0 and random.random() <= (batches_to_use_so_far + num_batches_this_file - num_batches_per_subepoch) / num_batches_this_file:
                     found_enough = True
                     break
 
@@ -855,12 +946,14 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
     # METRICS -----------------------------------------------------------------------------------
     def detensorify_metrics(metrics):
-        ret = {}
-        for key in metrics:
-            if isinstance(metrics[key], torch.Tensor):
-                ret[key] = metrics[key].detach().cpu().item()
-            else:
-                ret[key] = metrics[key]
+        ret = {key: value for key, value in metrics.items() if not isinstance(value, torch.Tensor)}
+        keys = [key for key, value in metrics.items() if isinstance(value, torch.Tensor)]
+        if keys:
+            values = torch.stack([metrics[key].detach().reshape([]).float() for key in keys]).cpu().tolist()
+            ret.update(zip(keys, values))
+        if "gnorm_batch" in ret and not (math.isfinite(ret["gnorm_batch"]) and abs(ret["gnorm_batch"]) < 1e30):
+            del ret["gnorm_batch"]
+            ret.pop("exgnorm_sum", None)
         return ret
 
     # _sum metrics dict entries will get reported as a moving average of their values
@@ -985,6 +1078,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
             logging.info(f"Current grad scale: {scaler.get_scale()}")
 
         lr_right_now, normal_weight_decay_right_now = update_and_return_lr_and_wd()
+        last_auto_lr_scale = lr_scale_auto_factor(train_state)
         maybe_update_brenorm_params()
 
         # SUB EPOCH LOOP -----------
@@ -1009,8 +1103,6 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                     barrier.wait()
                 for wpipe in writepipes:
                     wpipe.send(train_files_to_use)
-                # Wait briefly just in case to reduce chance of races with filesystem or anything else
-                time.sleep(5)
             else:
                 if barrier is not None:
                     barrier.wait()
@@ -1032,15 +1124,16 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                 pos_len=pos_len,
                 device=device,
                 randomize_symmetries=True,
-                model_config=model_config
+                model_config=model_config,
+                board_shape=board_shape
             ):
                 optimizer.zero_grad(set_to_none=True)
                 if use_fp16:
                     with autocast():
-                        model_outputs = ddp_model(batch["binaryInputNCHW"],batch["globalInputNC"])
+                        model_outputs = training_forward(batch["binaryInputNCHW"],batch["globalInputNC"])
                     model_outputs = raw_model.float32ify_output(model_outputs)
                 else:
-                    model_outputs = ddp_model(batch["binaryInputNCHW"],batch["globalInputNC"])
+                    model_outputs = training_forward(batch["binaryInputNCHW"],batch["globalInputNC"])
 
                 postprocessed = raw_model.postprocess_output(model_outputs)
                 metrics = metrics_obj.metrics_dict_batchwise(
@@ -1048,6 +1141,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                     postprocessed,
                     batch,
                     is_training=True,
+                    compute_model_norms=(batch_count_this_epoch == 0 or (batch_count_this_epoch + 1) % print_train_loss_every_batches == 0),
                     soft_policy_weight_scale=soft_policy_weight_scale,
                     value_loss_scale=value_loss_scale,
                     td_value_loss_scales=td_value_loss_scales,
@@ -1086,12 +1180,9 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                 # Loosen gradient clipping as we shift to smaller learning rates
                 gnorm_cap = gnorm_cap / math.sqrt(max(0.0000001,lr_scale * lr_scale_auto_factor(train_state)))
 
-                gnorm = torch.nn.utils.clip_grad_norm_(ddp_model.parameters(), gnorm_cap).detach().cpu().item()
-
-                if math.isfinite(gnorm) and abs(gnorm < 1e30):
-                    metrics["gnorm_batch"] = gnorm
-                    exgnorm = max(0.0, gnorm - gnorm_cap)
-                    metrics["exgnorm_sum"] = exgnorm * batch_size
+                gnorm = torch.nn.utils.clip_grad_norm_(ddp_model.parameters(), gnorm_cap).detach()
+                metrics["gnorm_batch"] = gnorm
+                metrics["exgnorm_sum"] = torch.clamp(gnorm - gnorm_cap, min=0.0) * batch_size
 
                 metrics["pslr_batch"] = lr_right_now
                 metrics["wdnormal_batch"] = normal_weight_decay_right_now
@@ -1138,9 +1229,12 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                     metrics["time_since_last_print"] = timediff
                     log_metrics(running_metrics["sums"], running_metrics["weights"], metrics, train_metrics_out)
 
-                # Update LR more frequently at the start for smoother warmup ramp and wd adjustment
-                if train_state["global_step_samples"] <= 50000000 and batch_count_this_epoch % 10 == 0:
+                # Keep warmup smooth and apply schedule changes before the next batch.
+                auto_lr_scale = lr_scale_auto_factor(train_state)
+                if (train_state["global_step_samples"] <= 50000000 and batch_count_this_epoch % 10 == 0
+                        or auto_lr_scale != last_auto_lr_scale):
                     lr_right_now, normal_weight_decay_right_now = update_and_return_lr_and_wd()
+                    last_auto_lr_scale = auto_lr_scale
 
                 # Update batch renorm parameters
                 if batch_count_this_epoch % 500 == 0:
@@ -1214,7 +1308,8 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                         pos_len=pos_len,
                         device=device,
                         randomize_symmetries=True,
-                        model_config=model_config
+                        model_config=model_config,
+                        board_shape=board_shape
                     ):
                         model_outputs = ddp_model(batch["binaryInputNCHW"],batch["globalInputNC"])
                         postprocessed = raw_model.postprocess_output(model_outputs)
@@ -1223,6 +1318,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                             postprocessed,
                             batch,
                             is_training=False,
+                            compute_model_norms=(val_samples == 0),
                             soft_policy_weight_scale=soft_policy_weight_scale,
                             value_loss_scale=value_loss_scale,
                             td_value_loss_scales=td_value_loss_scales,
@@ -1234,15 +1330,18 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                         val_samples += batch_size
                         if max_val_samples is not None and val_samples > max_val_samples:
                             break
+                    if val_samples > 0:
                         val_metric_sums["nsamp_train"] = running_metrics["sums"]["nsamp"]
                         val_metric_weights["nsamp_train"] = running_metrics["weights"]["nsamp"]
                         val_metric_sums["wsum_train"] = running_metrics["sums"]["wsum"]
                         val_metric_weights["wsum_train"] = running_metrics["weights"]["wsum"]
-                    last_val_metrics["sums"] = val_metric_sums
-                    last_val_metrics["weights"] = val_metric_weights
-                    log_metrics(val_metric_sums, val_metric_weights, metrics, val_metrics_out)
-                    t1 = time.perf_counter()
-                    logging.info(f"Validation took {t1-t0} seconds")
+                        last_val_metrics["sums"] = val_metric_sums
+                        last_val_metrics["weights"] = val_metric_weights
+                        log_metrics(val_metric_sums, val_metric_weights, metrics, val_metrics_out)
+                        t1 = time.perf_counter()
+                        logging.info(f"Validation took {t1-t0} seconds")
+                    else:
+                        logging.info("No validation batches, skipping validation step")
                     ddp_model.train()
 
         if rank == 0:
@@ -1278,7 +1377,6 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                     os.mkdir(savepathtmp)
                     logging.info("SAVING MODEL FOR EXPORT TO: " + savepath)
                     save(ddp_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics, path=os.path.join(savepathtmp,"model.ckpt"))
-                    time.sleep(2)
                     os.rename(savepathtmp,savepath)
 
         if max_epochs_this_instance is not None and max_epochs_this_instance >= 0 and num_epochs_this_instance >= max_epochs_this_instance:

@@ -1542,3 +1542,37 @@ for name, base_config in list(config_of_name.items()):
         config["intermediate_head_blocks"] = len(config["block_kind"])
         config["trunk_normless"] = True
         config_of_name[name+"-bnh"] = config
+
+# Nested transformer trunk with the same game features and heads as the CNNs.
+config_of_name["b4c256h4nbttflrs-y"] = {
+    "version": 11, "norm_kind": "fixscaleonenorm", "bnorm_use_gamma": True,
+    "bnorm_epsilon": 0.0001, "bnorm_running_avg_momentum": 0.001,
+    "initial_conv_1x1": False, "gamma_weight_decay_center_1": True,
+    "trunk_num_channels": 256, "mid_num_channels": 128, "gpool_num_channels": 32,
+    "transformer_ffn_channels": 384, "transformer_heads": 4, "transformer_kv_heads": 4,
+    "learnable_rope": True, "activation": "silu",
+    "trunk_final_rmsnorm": True, "trunk_rmsnorm_spatial": True,
+    "separate_attention_decay": True,
+    "block_kind": [[f"block{i+1}", "bottlenest2transformerropesg"] for i in range(4)],
+    "p1_num_channels": 32, "g1_num_channels": 32, "v1_num_channels": 32,
+    "sbv2_num_channels": 64, "num_scorebeliefs": 6, "v2_size": 80,
+    "board_shape": "y", "packed_attention": True,
+}
+
+config_of_name["b4c256h4nbttflrs-hex"] = {
+    **config_of_name["b4c256h4nbttflrs-y"],
+    "board_shape": "hex", "packed_attention": False,
+}
+
+config_of_name["b4c256h4nbttflrs-yavalath"] = {
+    **config_of_name["b4c256h4nbttflrs-y"],
+    "board_shape": "yavalath", "packed_attention": False,
+}
+
+
+config_of_name["b4c256h4nbtgraph-fson-silu-rsnh"] = {
+    **config_of_name["b4c256h4nbttflrs-y"],
+    "board_shape": "bentY", "initial_conv_1x1": True,
+    "learnable_rope": False, "packed_attention": True,
+    "block_kind": [[f"block{i+1}", "bottlenest2transformergraphsg"] for i in range(4)],
+}

@@ -1,7 +1,7 @@
 #pragma once
 #include "../search/asyncbot.h"
 
-class Search;
+struct Search;
 
 namespace RandomOpening {
   void initializeBalancedRandomOpening(

@@ -55,6 +55,7 @@ Hash128 PatternBonusTable::getHash(Player pla, Loc moveLoc, const Board& board) 
     return Hash128();
 
   Hash128 hash = patternHasher.getHash(board,moveLoc,pla);
+  hash ^= Board::ZOBRIST_BOARD_SHAPE_HASH[(int)board.shape];
   hash ^= ZOBRIST_MOVE_LOCS[moveLoc];
   hash ^= Board::ZOBRIST_SIZE_X_HASH[board.x_size];
   hash ^= Board::ZOBRIST_SIZE_Y_HASH[board.y_size];
@@ -90,8 +91,9 @@ void PatternBonusTable::addBonus(Player pla, Loc moveLoc, const Board& board, do
     return;
 
   Hash128 hash = patternHasher.getHashWithSym(board,moveLoc,pla,symmetry,flipColors);
+  hash ^= Board::ZOBRIST_BOARD_SHAPE_HASH[(int)board.shape];
   hash ^= ZOBRIST_MOVE_LOCS[SymmetryHelpers::getSymLoc(moveLoc,board,symmetry)];
-  if(SymmetryHelpers::isTranspose(symmetry)) {
+  if(SymmetryHelpers::isHexTranspose(symmetry)) {
     hash ^= Board::ZOBRIST_SIZE_X_HASH[board.y_size];
     hash ^= Board::ZOBRIST_SIZE_Y_HASH[board.x_size];
   }
@@ -127,7 +129,7 @@ void PatternBonusTable::addBonusForGameMoves(const BoardHistory& game, double bo
       break;
     if(onlyPla == C_EMPTY || onlyPla == pla) {
       for(int flipColors = 0; flipColors < 2; flipColors++) {
-        for(int symmetry = 0; symmetry < 8; symmetry++) {
+        for(int symmetry = 0; symmetry < (board.shape == BoardShape::Hex ? 8 : 1); symmetry++) {
           //getRecentBoard(1) - the convention is to pattern match on the board BEFORE the move is played.
           //This is also more pricipled than convening on the board after since with different captures, moves
           //may have different effects even while leading to the same position.
@@ -146,7 +148,8 @@ void PatternBonusTable::avoidRepeatedSgfMoves(
   size_t maxFiles,
   const vector<string>& allowedPlayerNames,
   Logger& logger,
-  const string& logSource
+  const string& logSource,
+  BoardShape defaultShape
 ) {
   vector<string> sgfFiles;
   FileHelpers::collectSgfsFromDirsOrFiles(sgfsDirsOrFiles,sgfFiles);
@@ -187,7 +190,7 @@ void PatternBonusTable::avoidRepeatedSgfMoves(
         return;
 
       for(int flipColorsInt = 0; flipColorsInt < 2; flipColorsInt++) {
-        for(int symmetry = 0; symmetry < 8; symmetry++) {
+        for(int symmetry = 0; symmetry < (hist.initialBoard.shape == BoardShape::Hex ? 8 : 1); symmetry++) {
           //getRecentBoard(1) - the convention is to pattern match on the board BEFORE the move is played.
           //This is also more pricipled than convening on the board after since with different captures, moves
           //may have different effects even while leading to the same position.
@@ -204,7 +207,7 @@ void PatternBonusTable::avoidRepeatedSgfMoves(
     
     bool allowGameOver = false;
     std::set<Hash128> uniqueHashes;
-    sgf->iterAllUniquePositions(uniqueHashes, hashComments, hashParent, allowGameOver, NULL, posHandler);
+    sgf->iterAllUniquePositions(uniqueHashes, hashComments, hashParent, allowGameOver, NULL, posHandler, defaultShape);
     logger.write("Added " + Global::uint64ToString(hashesThisGame.size()) + " shapes to penalize repeats for " + logSource + " from " + fileName);
 
     delete sgf;

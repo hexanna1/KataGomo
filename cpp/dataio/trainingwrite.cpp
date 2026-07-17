@@ -6,23 +6,13 @@
 using namespace std;
 
 template<typename T>
-static void selfTransposeNCHW(T* src, int n, int c, int h, int w) {
-  T* buf = new T[n * c * h * w];
-  for(int i = 0; i < n; i++) {
-    for(int j = 0; j < c; j++) {
-      int bias = i * c * h * w + j * h * w;
-      for(int y = 0; y < h; y++) {
-        for(int x = 0; x < w; x++) {
-          int spos = NNPos::xyToPos(x, y, w);
-          int dpos = NNPos::xyToPos(y, x, w);
-          buf[dpos + bias] = src[spos + bias];
-        }
-      }
-    }
+static void transposeSquarePlanes(T* data, int channels, int size) {
+  for(int c = 0; c < channels; c++) {
+    T* plane = data + c * size * size;
+    for(int y = 0; y < size; y++)
+      for(int x = 0; x < y; x++)
+        std::swap(plane[y * size + x],plane[x * size + y]);
   }
-  std::copy(buf, buf + n * c * h * w, src);
-
-  delete buf;
 }
 
 ValueTargets::ValueTargets()
@@ -338,8 +328,8 @@ void TrainingWriteBuffers::addRow(
     else
       ASSERT_UNREACHABLE;
     
-    if(nextPlayer == C_WHITE)
-      selfTransposeNCHW(rowBin, 1, numBinaryChannels, dataYLen, dataXLen);
+    if(board.shape == BoardShape::Hex && nextPlayer == C_WHITE)
+      transposeSquarePlanes(rowBin,numBinaryChannels,dataXLen);
 
     //Pack bools bitwise into uint8_t
     uint8_t* rowBinPacked = binaryInputNCHWPacked.data + curRows * numBinaryChannels * packedBoardArea;
@@ -375,13 +365,13 @@ void TrainingWriteBuffers::addRow(
     rowGlobal[28] = 0.0f;
   }
 
-  if(nextPlayer == C_WHITE) {
+  if(board.shape == BoardShape::Hex && nextPlayer == C_WHITE) {
     for(int i = 0; i < POLICY_TARGET_NUM_CHANNELS; i++)
-      selfTransposeNCHW(rowPolicy + i * policySize, 1, 1, dataYLen, dataXLen);
+      transposeSquarePlanes(rowPolicy+i*policySize,1,dataXLen);
   }
 
   //Fill td-like value targets
-  int boardArea = board.x_size * board.y_size;
+  int boardArea = board.playableArea();
   assert(whiteValueTargetsIdx >= 0 && whiteValueTargetsIdx < whiteValueTargets.size());
   fillValueTDTargets(whiteValueTargets, whiteValueTargetsIdx, nextPlayer, 0.0, rowGlobal);
   //These three constants used to be 'nicer' numbers 0.18, 0.06, 0.02, but we screwed up the functional form
@@ -539,8 +529,8 @@ void TrainingWriteBuffers::addRow(
     rowOwnership[i+posArea*4] = 0;
   }
 
-  if(nextPlayer == C_WHITE)
-    selfTransposeNCHW(rowOwnership, 1, 5, dataYLen, dataXLen);
+  if(board.shape == BoardShape::Hex && nextPlayer == C_WHITE)
+    transposeSquarePlanes(rowOwnership,VALUE_SPATIAL_TARGET_NUM_CHANNELS,dataXLen);
   curRows++;
 }
 
