@@ -62,6 +62,7 @@ if __name__ == "__main__":
     optional_args.add_argument('-initial-checkpoint', help='If no training checkpoint exists, initialize from this checkpoint', required=False)
 
     required_args.add_argument('-pos-len', help='Spatial edge length of expected training data, e.g. 19 for 19x19 Go', type=int, required=True)
+    optional_args.add_argument('-board-shape', help='Board geometry: y, obtuseY, or bentY', default='y', required=False)
     required_args.add_argument('-batch-size', help='Per-GPU batch size to use for training', type=int, required=True)
     optional_args.add_argument('-samples-per-epoch', help='Number of data samples to consider as one epoch', type=int, required=False)
     optional_args.add_argument('-model-kind', help='String name for what model config to use', required=False)
@@ -76,6 +77,7 @@ if __name__ == "__main__":
     optional_args.add_argument('-lookahead-print', help='Only print on lookahead syncs', required=False, action='store_true')
 
     optional_args.add_argument('-multi-gpus', help='Use multiple gpus, comma-separated device ids', required=False)
+    optional_args.add_argument('-device', help='Training device: auto, cuda, mps, or cpu', default='auto', required=False)
     optional_args.add_argument('-use-fp16', help='Use fp16 training', required=False, action='store_true')
 
     optional_args.add_argument('-epochs-per-export', help='Export model once every this many epochs', type=int, required=False)
@@ -144,6 +146,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
     initial_checkpoint = args["initial_checkpoint"]
 
     pos_len = args["pos_len"]
+    board_shape = data_processing_pytorch.normalize_board_shape(args["board_shape"])
     batch_size = args["batch_size"]
     samples_per_epoch = args["samples_per_epoch"]
     model_kind = args["model_kind"]
@@ -158,6 +161,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
     lookahead_print = args["lookahead_print"]
 
     use_fp16 = args["use_fp16"]
+    device_arg = args["device"].lower()
 
     epochs_per_export = args["epochs_per_export"]
     export_prob = args["export_prob"]
@@ -239,18 +243,42 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
     # FIGURE OUT MULTIGPU ------------------------------------------------------------
     if world_size > 1:
+        if device_arg not in ("auto", "cuda"):
+            raise ValueError("Multi-GPU training is only supported with CUDA")
         multiprocessing_setup(rank, world_size)
         atexit.register(multiprocessing_cleanup)
         assert torch.cuda.is_available()
 
-    if True or torch.cuda.is_available():
+    has_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+
+    if device_arg == "auto":
+        if torch.cuda.is_available():
+            device_arg = "cuda"
+        elif has_mps:
+            device_arg = "mps"
+        else:
+            device_arg = "cpu"
+
+    if device_arg == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA requested but torch.cuda.is_available() is false")
         my_gpu_id = multi_gpu_device_ids[rank]
         torch.cuda.set_device(my_gpu_id)
         logging.info("Using GPU device: " + torch.cuda.get_device_name())
         device = torch.device("cuda", my_gpu_id)
-    else:
-        logging.warning("WARNING: No GPU, using CPU")
+    elif device_arg == "mps":
+        if not has_mps:
+            raise ValueError("MPS requested but torch.backends.mps.is_available() is false")
+        logging.info("Using MPS device")
+        device = torch.device("mps")
+    elif device_arg == "cpu":
+        logging.warning("WARNING: Using CPU")
         device = torch.device("cpu")
+    else:
+        raise ValueError("Unknown -device value: " + device_arg)
+
+    if use_fp16 and device.type != "cuda":
+        raise ValueError("-use-fp16 is currently only supported with CUDA training")
 
     # LOAD MODEL ---------------------------------------------------------------------
 
@@ -400,10 +428,10 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
             if initial_checkpoint is not None:
                 if os.path.exists(initial_checkpoint):
-                    logging.info("Using initial checkpoint: {initial_checkpoint}")
+                    logging.info(f"Using initial checkpoint: {initial_checkpoint}")
                     path_to_load_from = initial_checkpoint
                 else:
-                    raise Exception("No preexisting checkpoint found, initial checkpoint provided is invalid: {initial_checkpoint}")
+                    raise Exception(f"No preexisting checkpoint found, initial checkpoint provided is invalid: {initial_checkpoint}")
             else:
                 path_to_load_from = None
         else:
@@ -446,7 +474,7 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
 
             return (model_config, ddp_model, raw_model, swa_model, optimizer, metrics_obj, running_metrics, train_state, last_val_metrics)
         else:
-            state_dict = torch.load(path_to_load_from, map_location=device)
+            state_dict = torch.load(path_to_load_from, map_location=device, weights_only=False)
             model_config = state_dict["config"] if "config" in state_dict else modelconfigs.config_of_name[model_kind]
             logging.info(str(model_config))
             raw_model = Model(model_config,pos_len)
@@ -1032,7 +1060,8 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                 pos_len=pos_len,
                 device=device,
                 randomize_symmetries=True,
-                model_config=model_config
+                model_config=model_config,
+                board_shape=board_shape
             ):
                 optimizer.zero_grad(set_to_none=True)
                 if use_fp16:
@@ -1214,7 +1243,8 @@ def main(rank: int, world_size: int, args, multi_gpu_device_ids, readpipes, writ
                         pos_len=pos_len,
                         device=device,
                         randomize_symmetries=True,
-                        model_config=model_config
+                        model_config=model_config,
+                        board_shape=board_shape
                     ):
                         model_outputs = ddp_model(batch["binaryInputNCHW"],batch["globalInputNC"])
                         postprocessed = raw_model.postprocess_output(model_outputs)

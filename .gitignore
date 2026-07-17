@@ -1,4 +1,4 @@
-
+.DS_Store
 
 *.bak
 .vs
@@ -13,6 +13,20 @@ cpp/build_opencl
 cpp/build_eigen
 cpp/out
 
+/build-opencl/
+/scripts/y*/data*/
+/scripts/y*/ktmp*/
+/scripts/oy*/data*/
+/scripts/oy*/ktmp*/
+/scripts/by*/data*/
+/scripts/by*/ktmp*/
+/scripts/*/backups*/
+/scripts/*/gtp_logs*/
+/scripts/**/*.py
+/gtp_logs/
+*.md
+!/THIRD_PARTY_NOTICES.md
+
 
 
 
@@ -23,6 +37,7 @@ cpp/out
 *.exe
 *~
 __pycache__
+*.pyc
 *.h5
 *.log
 *.cbp
@@ -101,4 +116,3 @@ tmpsgf/
 watchgame.txt
 models/
 python/startposesupload.txt
-

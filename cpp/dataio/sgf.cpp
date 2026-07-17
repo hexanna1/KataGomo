@@ -805,6 +805,7 @@ string Sgf::PositionSample::toJsonLine(const Sgf::PositionSample& sample) {
   json data;
   data["xSize"] = sample.board.x_size;
   data["ySize"] = sample.board.y_size;
+  data["shape"] = BoardShapeIO::toString(sample.board.shape);
   data["board"] = Board::toStringSimple(sample.board,'/');
   data["nextPla"] = PlayerIO::playerToStringShort(sample.nextPla);
   vector<string> moveLocs;
@@ -830,7 +831,8 @@ Sgf::PositionSample Sgf::PositionSample::ofJsonLine(const string& s) {
   try {
     int xSize = data["xSize"].get<int>();
     int ySize = data["ySize"].get<int>();
-    sample.board = Board::parseBoard(xSize,ySize,data["board"].get<string>(),'/');
+    BoardShape shape = BoardShapeIO::parse(data["shape"].get<string>());
+    sample.board = Board::parseBoard(xSize,ySize,shape,data["board"].get<string>(),'/');
     sample.nextPla = PlayerIO::parsePlayer(data["nextPla"].get<string>());
     vector<string> moveLocs = data["moveLocs"].get<vector<string>>();
     vector<string> movePlas = data["movePlas"].get<vector<string>>();
@@ -867,7 +869,7 @@ Sgf::PositionSample Sgf::PositionSample::ofJsonLine(const string& s) {
 
 Sgf::PositionSample Sgf::PositionSample::getColorFlipped() const {
   Sgf::PositionSample other = *this;
-  Board newBoard(other.board.x_size,other.board.y_size);
+  Board newBoard(other.board.x_size,other.board.y_size,other.board.shape);
   for(int y = 0; y < other.board.y_size; y++) {
     for(int x = 0; x < other.board.x_size; x++) {
       Loc loc = Location::getLoc(x,y,other.board.x_size);

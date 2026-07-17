@@ -1,4 +1,5 @@
 #include "../neuralnet/nninputs.h"
+#include "../game/benty.h"
 
 using namespace std;
 
@@ -200,61 +201,167 @@ void NNOutput::debugPrint(ostream& out, const Board& board) {
 
 //-------------------------------------------------------------------------------------------------------------
 
-static void copyWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int cSize, bool useNHWC, int symmetry, bool reverse) {
-  bool transpose = (symmetry & 0x4) != 0 && hSize == wSize;
-  bool flipX = (symmetry & 0x1) != 0;
-  bool flipY = (symmetry & 0x1) != 0;
-  if(transpose && !reverse)
-    std::swap(flipX,flipY);
+static const int Y_SYM_PERMS[SymmetryHelpers::NUM_SYMMETRIES][3] = {
+  {0, 1, 2},
+  {1, 2, 0},
+  {2, 0, 1},
+  {1, 0, 2},
+  {0, 2, 1},
+  {2, 1, 0},
+};
+
+static bool isTrianglePoint(int x, int y, int size) {
+  return x >= 0 && y >= 0 && x < size && y < size && x + y < size;
+}
+
+static bool isObtuseYPoint(int x, int y, int size) {
+  if(x < 0 || y < 0 || x >= size || y >= size || size <= 0 || size % 2 != 1)
+    return false;
+  int n = (size - 1) / 2;
+  int rx = size - 1 - x;
+  int ry = size - 1 - y;
+  bool inTopLeftCut = x < n && y < n && x + y < n;
+  bool inBottomRightCut = rx < n && ry < n && rx + ry < n;
+  return !inTopLeftCut && !inBottomRightCut;
+}
+
+static int getPermSign(const int perm[3]) {
+  int inversions = 0;
+  for(int i = 0; i < 3; i++) {
+    for(int j = i+1; j < 3; j++) {
+      if(perm[i] > perm[j])
+        inversions++;
+    }
+  }
+  return inversions % 2 == 0 ? 1 : -1;
+}
+
+static void getYSymCoords(int x, int y, int size, int symmetry, int& sx, int& sy) {
+  assert(symmetry >= 0 && symmetry < SymmetryHelpers::NUM_SYMMETRIES);
+  assert(isTrianglePoint(x, y, size));
+
+  int coords[3] = {x, y, size - 1 - x - y};
+  sx = coords[Y_SYM_PERMS[symmetry][0]];
+  sy = coords[Y_SYM_PERMS[symmetry][1]];
+  assert(isTrianglePoint(sx, sy, size));
+}
+
+static void getObtuseYSymCoords(int x, int y, int size, int symmetry, int& sx, int& sy) {
+  assert(symmetry >= 0 && symmetry < SymmetryHelpers::NUM_SYMMETRIES);
+  assert(isObtuseYPoint(x, y, size));
+
+  int n = (size - 1) / 2;
+  int q = x - n;
+  int r = y - n;
+  int coords[3] = {q, r, -q - r};
+  int sign = getPermSign(Y_SYM_PERMS[symmetry]);
+  sx = sign * coords[Y_SYM_PERMS[symmetry][0]] + n;
+  sy = sign * coords[Y_SYM_PERMS[symmetry][1]] + n;
+  assert(isObtuseYPoint(sx, sy, size));
+}
+
+static bool isSymmetryPoint(int x, int y, int xSize, int ySize, BoardShape shape) {
+  if(xSize != ySize)
+    return false;
+  switch(shape) {
+  case BoardShape::Y:
+    return isTrianglePoint(x, y, xSize);
+  case BoardShape::ObtuseY:
+    return isObtuseYPoint(x, y, xSize);
+  case BoardShape::BentY:
+    return BentY::isSupportedTensorLen(xSize) &&
+      x >= 0 && y >= 0 && x < xSize && y < ySize &&
+      BentY::getTopology(xSize).playable[y * xSize + x];
+  default:
+    ASSERT_UNREACHABLE;
+    return false;
+  }
+}
+
+static void getSymCoords(int x, int y, int xSize, int ySize, BoardShape shape, int symmetry, int& sx, int& sy) {
+  assert(xSize == ySize);
+  switch(shape) {
+  case BoardShape::Y:
+    getYSymCoords(x, y, xSize, symmetry, sx, sy);
+    return;
+  case BoardShape::ObtuseY:
+    getObtuseYSymCoords(x, y, xSize, symmetry, sx, sy);
+    return;
+  case BoardShape::BentY: {
+    int symPos = BentY::getTopology(xSize).symPos[y * xSize + x][symmetry];
+    sx = symPos % xSize;
+    sy = symPos / xSize;
+    return;
+  }
+  default:
+    ASSERT_UNREACHABLE;
+  }
+}
+
+static int getSymmetryForPerm(const int perm[3]) {
+  for(int symmetry = 0; symmetry < SymmetryHelpers::NUM_SYMMETRIES; symmetry++) {
+    if(
+      Y_SYM_PERMS[symmetry][0] == perm[0] &&
+      Y_SYM_PERMS[symmetry][1] == perm[1] &&
+      Y_SYM_PERMS[symmetry][2] == perm[2]
+    )
+      return symmetry;
+  }
+  ASSERT_UNREACHABLE;
+  return 0;
+}
+
+static void copyWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int cSize, bool useNHWC, int symmetry, BoardShape shape, int boardXSize, int boardYSize, bool reverse) {
+  assert(symmetry >= 0 && symmetry < SymmetryHelpers::NUM_SYMMETRIES);
+  assert(hSize == wSize);
+  if(boardXSize <= 0)
+    boardXSize = wSize;
+  if(boardYSize <= 0)
+    boardYSize = hSize;
+  assert(boardXSize <= wSize);
+  assert(boardYSize <= hSize);
+  assert(boardXSize == boardYSize);
+  int totalLen = nSize * hSize * wSize * cSize;
+  std::fill(dst, dst + totalLen, 0.0f);
+
   if(useNHWC) {
-    int nStride = hSize * wSize * cSize;
-    int hStride = wSize * cSize;
-    int wStride = cSize;
-    int hBaseNew = 0; int hStrideNew = hStride;
-    int wBaseNew = 0; int wStrideNew = wStride;
-
-    if(flipY) { hBaseNew = (hSize-1) * hStrideNew; hStrideNew = -hStrideNew; }
-    if(flipX) { wBaseNew = (wSize-1) * wStrideNew; wStrideNew = -wStrideNew; }
-
-    if(transpose)
-      std::swap(hStrideNew,wStrideNew);
-
     for(int n = 0; n<nSize; n++) {
-      for(int h = 0; h<hSize; h++) {
-        int nhOld = n * nStride + h*hStride;
-        int nhNew = n * nStride + hBaseNew + h*hStrideNew;
-        for(int w = 0; w<wSize; w++) {
-          int nhwOld = nhOld + w*wStride;
-          int nhwNew = nhNew + wBaseNew + w*wStrideNew;
+      for(int y = 0; y<boardYSize; y++) {
+        for(int x = 0; x<boardXSize; x++) {
+          if(!isSymmetryPoint(x, y, boardXSize, boardYSize, shape))
+            continue;
+          int sx;
+          int sy;
+          getSymCoords(x, y, boardXSize, boardYSize, shape, symmetry, sx, sy);
           for(int c = 0; c<cSize; c++) {
-            dst[nhwNew + c] = src[nhwOld + c];
+            if(reverse)
+              dst[((n * hSize + y) * wSize + x) * cSize + c] =
+                src[((n * hSize + sy) * wSize + sx) * cSize + c];
+            else
+              dst[((n * hSize + sy) * wSize + sx) * cSize + c] =
+                src[((n * hSize + y) * wSize + x) * cSize + c];
           }
         }
       }
     }
   }
   else {
-    int ncSize = nSize * cSize;
-    int ncStride = hSize * wSize;
-    int hStride = wSize;
-    int wStride = 1;
-    int hBaseNew = 0; int hStrideNew = hStride;
-    int wBaseNew = 0; int wStrideNew = wStride;
-
-    if(flipY) { hBaseNew = (hSize-1) * hStrideNew; hStrideNew = -hStrideNew; }
-    if(flipX) { wBaseNew = (wSize-1) * wStrideNew; wStrideNew = -wStrideNew; }
-
-    if(transpose)
-      std::swap(hStrideNew,wStrideNew);
-
-    for(int nc = 0; nc<ncSize; nc++) {
-      for(int h = 0; h<hSize; h++) {
-        int nchOld = nc * ncStride + h*hStride;
-        int nchNew = nc * ncStride + hBaseNew + h*hStrideNew;
-        for(int w = 0; w<wSize; w++) {
-          int nchwOld = nchOld + w*wStride;
-          int nchwNew = nchNew + wBaseNew + w*wStrideNew;
-          dst[nchwNew] = src[nchwOld];
+    int spatialSize = hSize * wSize;
+    for(int n = 0; n<nSize; n++) {
+      for(int c = 0; c<cSize; c++) {
+        int ncBase = (n * cSize + c) * spatialSize;
+        for(int y = 0; y<boardYSize; y++) {
+          for(int x = 0; x<boardXSize; x++) {
+            if(!isSymmetryPoint(x, y, boardXSize, boardYSize, shape))
+              continue;
+            int sx;
+            int sy;
+            getSymCoords(x, y, boardXSize, boardYSize, shape, symmetry, sx, sy);
+            if(reverse)
+              dst[ncBase + y * wSize + x] = src[ncBase + sy * wSize + sx];
+            else
+              dst[ncBase + sy * wSize + sx] = src[ncBase + y * wSize + x];
+          }
         }
       }
     }
@@ -262,40 +369,48 @@ static void copyWithSymmetry(const float* src, float* dst, int nSize, int hSize,
 }
 
 
-void SymmetryHelpers::copyInputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int cSize, bool useNHWC, int symmetry) {
-  copyWithSymmetry(src, dst, nSize, hSize, wSize, cSize, useNHWC, symmetry, false);
+void SymmetryHelpers::copyInputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int cSize, bool useNHWC, int symmetry, BoardShape shape, int boardXSize, int boardYSize) {
+  copyWithSymmetry(src, dst, nSize, hSize, wSize, cSize, useNHWC, symmetry, shape, boardXSize, boardYSize, false);
 }
 
-void SymmetryHelpers::copyOutputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int symmetry) {
-  copyWithSymmetry(src, dst, nSize, hSize, wSize, 1, false, symmetry, true);
+void SymmetryHelpers::copyOutputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int symmetry, BoardShape shape, int boardXSize, int boardYSize) {
+  copyWithSymmetry(src, dst, nSize, hSize, wSize, 1, false, symmetry, shape, boardXSize, boardYSize, true);
 }
 
 int SymmetryHelpers::invert(int symmetry) {
-  return symmetry;
+  assert(symmetry >= 0 && symmetry < SymmetryHelpers::NUM_SYMMETRIES);
+  int invPerm[3];
+  for(int i = 0; i < 3; i++)
+    invPerm[Y_SYM_PERMS[symmetry][i]] = i;
+  return getSymmetryForPerm(invPerm);
 }
 
 int SymmetryHelpers::compose(int firstSymmetry, int nextSymmetry) {
-  return firstSymmetry ^ nextSymmetry;
+  assert(firstSymmetry >= 0 && firstSymmetry < SymmetryHelpers::NUM_SYMMETRIES);
+  assert(nextSymmetry >= 0 && nextSymmetry < SymmetryHelpers::NUM_SYMMETRIES);
+  int composedPerm[3];
+  for(int i = 0; i < 3; i++)
+    composedPerm[i] = Y_SYM_PERMS[firstSymmetry][Y_SYM_PERMS[nextSymmetry][i]];
+  return getSymmetryForPerm(composedPerm);
 }
 
 int SymmetryHelpers::compose(int firstSymmetry, int nextSymmetry, int nextNextSymmetry) {
   return compose(compose(firstSymmetry,nextSymmetry),nextNextSymmetry);
 }
 
-Loc SymmetryHelpers::getSymLoc(int x, int y, int xSize, int ySize, int symmetry) {
-  bool transpose = (symmetry & 0x4) != 0;
-  bool flipX = (symmetry & 0x1) != 0;
-  bool flipY = (symmetry & 0x1) != 0;
-  if(flipX) { x = xSize - x - 1; }
-  if(flipY) { y = ySize - y - 1; }
+Loc SymmetryHelpers::getSymLoc(int x, int y, int xSize, int ySize, BoardShape shape, int symmetry) {
+  assert(xSize == ySize);
+  if(!isSymmetryPoint(x, y, xSize, ySize, shape))
+    return Location::getLoc(x, y, xSize);
 
-  if(transpose)
-    std::swap(x,y);
-  return Location::getLoc(x,y,transpose ? ySize : xSize);
+  int sx;
+  int sy;
+  getSymCoords(x, y, xSize, ySize, shape, symmetry, sx, sy);
+  return Location::getLoc(sx, sy, xSize);
 }
 
 Loc SymmetryHelpers::getSymLoc(int x, int y, const Board& board, int symmetry) {
-  return getSymLoc(x,y,board.x_size,board.y_size,symmetry);
+  return getSymLoc(x,y,board.x_size,board.y_size,board.shape,symmetry);
 }
 
 Loc SymmetryHelpers::getSymLoc(Loc loc, const Board& board, int symmetry) {
@@ -307,27 +422,33 @@ Loc SymmetryHelpers::getSymLoc(Loc loc, const Board& board, int symmetry) {
 Loc SymmetryHelpers::getSymLoc(Loc loc, int xSize, int ySize, int symmetry) {
   if(loc == Board::NULL_LOC || loc == Board::PASS_LOC)
     return loc;
-  return getSymLoc(Location::getX(loc,xSize), Location::getY(loc,xSize), xSize, ySize, symmetry);
+  return getSymLoc(Location::getX(loc,xSize), Location::getY(loc,xSize), xSize, ySize, BoardShape::Y, symmetry);
+}
+
+Loc SymmetryHelpers::getSymLoc(int x, int y, int xSize, int ySize, int symmetry) {
+  return getSymLoc(x, y, xSize, ySize, BoardShape::Y, symmetry);
+}
+
+Loc SymmetryHelpers::getSymLoc(Loc loc, int xSize, int ySize, BoardShape shape, int symmetry) {
+  if(loc == Board::NULL_LOC || loc == Board::PASS_LOC)
+    return loc;
+  return getSymLoc(Location::getX(loc,xSize), Location::getY(loc,xSize), xSize, ySize, shape, symmetry);
 }
 
 
 Board SymmetryHelpers::getSymBoard(const Board& board, int symmetry) {
-  bool transpose = (symmetry & 0x4) != 0;
-  bool flipX = (symmetry & 0x1) != 0;
-  bool flipY = (symmetry & 0x1) != 0;
-  Board symBoard(
-    transpose ? board.y_size : board.x_size,
-    transpose ? board.x_size : board.y_size
-  );
+  assert(board.x_size == board.y_size);
+  Board symBoard(board.x_size, board.y_size, board.shape);
   for(int y = 0; y<board.y_size; y++) {
     for(int x = 0; x<board.x_size; x++) {
       Loc loc = Location::getLoc(x,y,board.x_size);
-      int symX = flipX ? board.x_size - x - 1 : x;
-      int symY = flipY ? board.y_size - y - 1 : y;
-      if(transpose)
-        std::swap(symX,symY);
-      Loc symLoc = Location::getLoc(symX,symY,symBoard.x_size);
-      bool suc = symBoard.setStone(symLoc,board.colors[loc]);
+      if(!board.isOnBoard(loc))
+        continue;
+      Color color = board.colors[loc];
+      if(color != C_BLACK && color != C_WHITE)
+        continue;
+      Loc symLoc = getSymLoc(x, y, board, symmetry);
+      bool suc = symBoard.setStone(symLoc,color);
       assert(suc);
       (void)suc;
     }
@@ -360,6 +481,8 @@ void SymmetryHelpers::markDuplicateMoveLocs(
     for(int y = 0; y < board.y_size; y++) {
       for(int x = 0; x < board.x_size; x++) {
         Loc loc = Location::getLoc(x, y, board.x_size);
+        if(!board.isOnBoard(loc))
+          continue;
         Loc symLoc = getSymLoc(x, y, board,symmetry);
         bool isStoneSym = (board.colors[loc] == board.colors[symLoc]);
         if(!isStoneSym ) {
@@ -381,6 +504,8 @@ void SymmetryHelpers::markDuplicateMoveLocs(
     for(int x = board.x_size-1; x >= 0; x--) {
       for(int y = 0; y < board.y_size; y++) {
         Loc loc = Location::getLoc(x, y, board.x_size);
+        if(!board.isOnBoard(loc))
+          continue;
         if(avoidMoves.size() > 0 && avoidMoves[loc] > 0)
           continue;
         for(int symmetry: validSymmetries) {
@@ -397,6 +522,8 @@ void SymmetryHelpers::markDuplicateMoveLocs(
     for(int x = 0; x < board.x_size; x++) {
       for(int y = board.y_size-1; y >= 0; y--) {
         Loc loc = Location::getLoc(x, y, board.x_size);
+        if(!board.isOnBoard(loc))
+          continue;
         if(avoidMoves.size() > 0 && avoidMoves[loc] > 0)
           continue;
         for(int symmetry: validSymmetries) {
@@ -510,10 +637,51 @@ void NNInputs::fillRowV7(
     resultsBeforeNN.init(board, hist, nextPlayer);
   }
 
+  vector<int> plaComponent;
+  vector<int> oppComponent;
+  vector<int> plaComponentSides;
+  vector<int> oppComponentSides;
+  auto buildComponents = [&](Player componentPla, vector<int>& componentIds, vector<int>& componentSides) {
+    componentIds.assign(Board::MAX_ARR_SIZE, -1);
+    vector<Loc> stack;
+    for(int boardY = 0; boardY < ySize; boardY++) {
+      for(int boardX = 0; boardX < xSize; boardX++) {
+        Loc start = Location::getLoc(boardX, boardY, xSize);
+        if(board.colors[start] != componentPla || componentIds[start] >= 0)
+          continue;
+        int component = (int)componentSides.size();
+        int sides = 0;
+        componentIds[start] = component;
+        stack.push_back(start);
+        while(!stack.empty()) {
+          Loc current = stack.back();
+          stack.pop_back();
+          sides |= board.sideMask(current);
+          Loc adjacent[6];
+          int numAdjacent = board.getAdjacentLocs(current, adjacent);
+          for(int i = 0; i < numAdjacent; i++) {
+            Loc next = adjacent[i];
+            if(board.colors[next] == componentPla && componentIds[next] < 0) {
+              componentIds[next] = component;
+              stack.push_back(next);
+            }
+          }
+        }
+        componentSides.push_back(sides);
+      }
+    }
+  };
+  if(board.shape == BoardShape::BentY) {
+    buildComponents(pla, plaComponent, plaComponentSides);
+    buildComponents(opp, oppComponent, oppComponentSides);
+  }
+
   for(int y = 0; y<ySize; y++) {
     for(int x = 0; x<xSize; x++) {
       int pos = NNPos::xyToPos(x,y,nnXLen);
       Loc loc = Location::getLoc(x,y,xSize);
+      if(!board.isOnBoard(loc))
+        continue;
 
       //Feature 0 - on board
       setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
@@ -521,11 +689,46 @@ void NNInputs::fillRowV7(
       Color stone = board.colors[loc];
 
       //Features 1,2 - pla,opp stone
-      //Features 3,4,5 - 1,2,3 libs
       if(stone == pla)
         setRowBin(rowBin,pos,1, 1.0f, posStride, featureStride);
       else if(stone == opp)
         setRowBin(rowBin,pos,2, 1.0f, posStride, featureStride);
+
+      if(board.shape == BoardShape::BentY) {
+        Loc adjacent[6];
+        int numAdjacent = board.getAdjacentLocs(loc, adjacent);
+        // Expose graph-local structure that planar convolutions cannot see across the cut seams.
+        if(numAdjacent == 5)
+          setRowBin(rowBin, pos, 4, 1.0f, posStride, featureStride);
+        if(stone == C_EMPTY) {
+          int plaNeighbors = 0;
+          int oppNeighbors = 0;
+          int plaSides = board.sideMask(loc);
+          int oppSides = plaSides;
+          for(int i = 0; i < numAdjacent; i++) {
+            Loc next = adjacent[i];
+            if(board.colors[next] == pla) {
+              plaNeighbors++;
+              plaSides |= plaComponentSides[plaComponent[next]];
+            }
+            else if(board.colors[next] == opp) {
+              oppNeighbors++;
+              oppSides |= oppComponentSides[oppComponent[next]];
+            }
+          }
+          auto atLeastTwoSides = [](int sides) {
+            return (sides & (sides - 1)) != 0;
+          };
+          if(plaNeighbors >= 1) setRowBin(rowBin, pos, 5, 1.0f, posStride, featureStride);
+          if(plaNeighbors >= 2) setRowBin(rowBin, pos, 6, 1.0f, posStride, featureStride);
+          if(oppNeighbors >= 1) setRowBin(rowBin, pos, 7, 1.0f, posStride, featureStride);
+          if(oppNeighbors >= 2) setRowBin(rowBin, pos, 8, 1.0f, posStride, featureStride);
+          if(atLeastTwoSides(plaSides)) setRowBin(rowBin, pos, 9, 1.0f, posStride, featureStride);
+          if(atLeastTwoSides(oppSides)) setRowBin(rowBin, pos, 10, 1.0f, posStride, featureStride);
+          if(plaSides == 7) setRowBin(rowBin, pos, 11, 1.0f, posStride, featureStride);
+          if(oppSides == 7) setRowBin(rowBin, pos, 12, 1.0f, posStride, featureStride);
+        }
+      }
 
     }
   }
@@ -553,13 +756,14 @@ void NNInputs::fillRowV7(
   else
     ASSERT_UNREACHABLE;
 
-  if(hist.rules.maxMoves > 0 && hist.rules.maxMoves < board.x_size * board.y_size) {
+  int boardArea = board.playableArea();
+  if(hist.rules.maxMoves > 0 && hist.rules.maxMoves < boardArea) {
     rowGlobal[4] = 1.0;
     rowGlobal[14] =
       nextPlayer == P_BLACK ? -nnInputParams.noResultUtilityForWhite : nnInputParams.noResultUtilityForWhite;
     int mm = hist.rules.maxMoves;
     int movecount = board.numStonesOnBoard();
-    int area = board.x_size * board.y_size;
+    int area = boardArea;
     int remain = mm - movecount;
     if (remain <= 0)
     {

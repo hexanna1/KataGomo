@@ -33,7 +33,7 @@ set_property(CACHE USE_BACKEND PROPERTY STRINGS "" CUDA TENSORRT OPENCL EIGEN)
 set(USE_TCMALLOC 0 CACHE BOOL "Use TCMalloc")
 set(NO_GIT_REVISION 0 CACHE BOOL "Disable embedding the git revision into the compiled exe")
 set(USE_AVX2 0 CACHE BOOL "Compile with AVX2")
-set(USE_BIGGER_BOARDS_EXPENSIVE 0 CACHE BOOL "Allow boards up to size 29. Compiling with this will use more memory and slow down KataGo, even when playing on boards of size 19.")
+set(USE_BIGGER_BOARDS_EXPENSIVE 0 CACHE BOOL "Allow larger boards at increased memory and performance cost")
 
 #--------------------------- NEURAL NET BACKEND ------------------------------------------------------------------------
 
@@ -181,6 +181,7 @@ add_executable(katago
   core/threadtest.cpp
   core/timer.cpp
   game/board.cpp
+  game/benty.cpp
   game/rules.cpp
   game/gamelogic.cpp
   game/randomopening.cpp
@@ -326,7 +327,9 @@ elseif(USE_BACKEND STREQUAL "EIGEN")
 endif()
 
 if(USE_BIGGER_BOARDS_EXPENSIVE)
-  target_compile_definitions(katago PRIVATE COMPILE_MAX_BOARD_LEN=29)
+  target_compile_definitions(katago PRIVATE COMPILE_MAX_BOARD_LEN=42)
+else()
+  target_compile_definitions(katago PRIVATE COMPILE_MAX_BOARD_LEN=27)
 endif()
 
 if(NO_GIT_REVISION AND (NOT BUILD_DISTRIBUTED))
@@ -441,4 +444,3 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang
 endif()
 
 target_include_directories(katago PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-

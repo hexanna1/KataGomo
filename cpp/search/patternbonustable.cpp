@@ -89,16 +89,12 @@ void PatternBonusTable::addBonus(Player pla, Loc moveLoc, const Board& board, do
   if(moveLoc == Board::NULL_LOC || moveLoc == Board::PASS_LOC )
     return;
 
+  assert(symmetry == 0);
+  (void)symmetry;
   Hash128 hash = patternHasher.getHashWithSym(board,moveLoc,pla,symmetry,flipColors);
-  hash ^= ZOBRIST_MOVE_LOCS[SymmetryHelpers::getSymLoc(moveLoc,board,symmetry)];
-  if(SymmetryHelpers::isTranspose(symmetry)) {
-    hash ^= Board::ZOBRIST_SIZE_X_HASH[board.y_size];
-    hash ^= Board::ZOBRIST_SIZE_Y_HASH[board.x_size];
-  }
-  else {
-    hash ^= Board::ZOBRIST_SIZE_X_HASH[board.x_size];
-    hash ^= Board::ZOBRIST_SIZE_Y_HASH[board.y_size];
-  }
+  hash ^= ZOBRIST_MOVE_LOCS[moveLoc];
+  hash ^= Board::ZOBRIST_SIZE_X_HASH[board.x_size];
+  hash ^= Board::ZOBRIST_SIZE_Y_HASH[board.y_size];
 
   if(contains(hashesThisGame,hash))
     return;
@@ -127,12 +123,10 @@ void PatternBonusTable::addBonusForGameMoves(const BoardHistory& game, double bo
       break;
     if(onlyPla == C_EMPTY || onlyPla == pla) {
       for(int flipColors = 0; flipColors < 2; flipColors++) {
-        for(int symmetry = 0; symmetry < 8; symmetry++) {
-          //getRecentBoard(1) - the convention is to pattern match on the board BEFORE the move is played.
-          //This is also more pricipled than convening on the board after since with different captures, moves
-          //may have different effects even while leading to the same position.
-          addBonus(pla, loc, hist.getRecentBoard(1), bonus, symmetry, (bool)flipColors, hashesThisGame);
-        }
+        //getRecentBoard(1) - the convention is to pattern match on the board BEFORE the move is played.
+        //This is also more pricipled than convening on the board after since with different captures, moves
+        //may have different effects even while leading to the same position.
+        addBonus(pla, loc, hist.getRecentBoard(1), bonus, 0, (bool)flipColors, hashesThisGame);
       }
     }
   }
@@ -187,15 +181,13 @@ void PatternBonusTable::avoidRepeatedSgfMoves(
         return;
 
       for(int flipColorsInt = 0; flipColorsInt < 2; flipColorsInt++) {
-        for(int symmetry = 0; symmetry < 8; symmetry++) {
-          //getRecentBoard(1) - the convention is to pattern match on the board BEFORE the move is played.
-          //This is also more pricipled than convening on the board after since with different captures, moves
-          //may have different effects even while leading to the same position.
-          bool flipColors = (bool)flipColorsInt;
-          Player symPla = flipColors ? getOpp(movePla) : movePla;
-          double bonus = symPla == P_WHITE ? -penalty*factor : penalty*factor;
-          addBonus(movePla, moveLoc, hist.getRecentBoard(1), bonus, symmetry, flipColors, hashesThisGame);
-        }
+        //getRecentBoard(1) - the convention is to pattern match on the board BEFORE the move is played.
+        //This is also more pricipled than convening on the board after since with different captures, moves
+        //may have different effects even while leading to the same position.
+        bool flipColors = (bool)flipColorsInt;
+        Player symPla = flipColors ? getOpp(movePla) : movePla;
+        double bonus = symPla == P_WHITE ? -penalty*factor : penalty*factor;
+        addBonus(movePla, moveLoc, hist.getRecentBoard(1), bonus, 0, flipColors, hashesThisGame);
       }
     };
 

@@ -5,6 +5,9 @@ individual readmes and/or license files for each one within their respective sub
 cpp/external. Additionally, cpp/core/sha2.cpp derives from another piece of external code
 and embeds its own license within that file.
 
+The Bent-Y topology implementation includes material derived from Abstract Play's gameslib.
+See THIRD_PARTY_NOTICES.md for its license and attribution.
+
 Aside from the above, the license for all OTHER content in this repo is as follows:
 
 ----------------------------------------

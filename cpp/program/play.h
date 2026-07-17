@@ -104,6 +104,7 @@ class GameInitializer {
   std::vector<int> allowedScoringRules;
   std::vector<int> allowedBSizes;
   std::vector<double> allowedBSizeRelProbs;
+  BoardShape boardShape;
 
   double allowRectangleProb;
 

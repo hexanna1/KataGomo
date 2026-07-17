@@ -69,9 +69,6 @@ static const vector<string> knownCommands = {
 
   "final_status_list",
 
-  "loadsgf",
-  "printsgf",
-
   //GTP extensions for board analysis
   // "genmove_analyze",
   "lz-genmove_analyze",
@@ -204,6 +201,7 @@ struct GTPEngine {
   NNEvaluator* nnEval;
   AsyncBot* bot;
   Rules currentRules; //Should always be the same as the rules in bot, if bot is not NULL.
+  BoardShape boardShape;
 
   //Stores the params we want to be using during genmoves or analysis
   SearchParams params;
@@ -227,6 +225,7 @@ struct GTPEngine {
 
   GTPEngine(
     const string& modelFile, SearchParams initialParams, Rules initialRules,
+    BoardShape initialBoardShape,
     double staticPDA,
     double normAvoidRepeatedPatternUtility,
     double genmoveWRN, double analysisWRN,
@@ -242,6 +241,7 @@ struct GTPEngine {
      nnEval(NULL),
      bot(NULL),
      currentRules(initialRules),
+     boardShape(initialBoardShape),
      params(initialParams),
      bTimeControls(),
      wTimeControls(),
@@ -330,9 +330,11 @@ struct GTPEngine {
       boardXSize = nnEval->getNNXLen();
       boardYSize = nnEval->getNNYLen();
     }
-    logger.write("Initializing board with boardXSize " + Global::intToString(boardXSize) + " boardYSize " + Global::intToString(boardYSize));
+    if(!Board::isValidSizeForShape(boardXSize,boardYSize,boardShape))
+      throw StringError("Board size " + Global::intToString(boardXSize) + "x" + Global::intToString(boardYSize) + " is not valid for boardShape " + BoardShapeIO::toString(boardShape));
+    logger.write("Initializing board with boardXSize " + Global::intToString(boardXSize) + " boardYSize " + Global::intToString(boardYSize) + " boardShape " + BoardShapeIO::toString(boardShape));
     if(!loggingToStderr)
-      cerr << ("Initializing board with boardXSize " + Global::intToString(boardXSize) + " boardYSize " + Global::intToString(boardYSize)) << endl;
+      cerr << ("Initializing board with boardXSize " + Global::intToString(boardXSize) + " boardYSize " + Global::intToString(boardYSize) + " boardShape " + BoardShapeIO::toString(boardShape)) << endl;
 
     string searchRandSeed;
     if(cfg.contains("searchRandSeed"))
@@ -343,7 +345,7 @@ struct GTPEngine {
     bot = new AsyncBot(params, nnEval, &logger, searchRandSeed);
     bot->setCopyOfExternalPatternBonusTable(patternBonusTable);
 
-    Board board(boardXSize,boardYSize);
+    Board board(boardXSize,boardYSize,boardShape);
     Player pla = P_BLACK;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
@@ -366,7 +368,7 @@ struct GTPEngine {
     assert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
+    Board board(newXSize,newYSize,boardShape);
     Player pla = P_BLACK;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
@@ -378,7 +380,7 @@ struct GTPEngine {
     assert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
+    Board board(newXSize,newYSize,boardShape);
     bool suc = board.setStones(initialStones);
     if(!suc)
       return false;
@@ -1185,6 +1187,8 @@ int MainCmds::gtp(const vector<string>& args) {
   if(startupPrintMessageToStderr && !logger.isLoggingToStderr()) {
     cerr << "Using " + initialRules.toStringMaybeNice() + " rules initially, unless GTP/GUI overrides this" << endl;
   }
+  BoardShape boardShape = cfg.contains("boardShape") ? BoardShapeIO::parse(cfg.getString("boardShape")) : BoardShape::Y;
+  logger.write("Using board shape " + BoardShapeIO::toString(boardShape));
 
   SearchParams initialParams = Setup::loadSingleParams(cfg,Setup::SETUP_FOR_GTP);
   logger.write("Using " + Global::intToString(initialParams.numThreads) + " CPU thread(s) for search");
@@ -1230,7 +1234,7 @@ int MainCmds::gtp(const vector<string>& args) {
   Player perspective = Setup::parseReportAnalysisWinrates(cfg,C_EMPTY);
 
   GTPEngine* engine = new GTPEngine(
-    nnModelFile,initialParams,initialRules,
+    nnModelFile,initialParams,initialRules,boardShape,
     staticPlayoutDoublingAdvantage,
     normalAvoidRepeatedPatternUtility, 
     genmoveWideRootNoise,analysisWideRootNoise,
@@ -1401,6 +1405,10 @@ int MainCmds::gtp(const vector<string>& args) {
       else if(newXSize > Board::MAX_LEN || newYSize > Board::MAX_LEN) {
         responseIsError = true;
         response = Global::strprintf("unacceptable size (Board::MAX_LEN is %d, consider increasing and recompiling)",(int)Board::MAX_LEN);
+      }
+      else if(!Board::isValidSizeForShape(newXSize,newYSize,engine->boardShape)) {
+        responseIsError = true;
+        response = "unacceptable size for boardShape " + BoardShapeIO::toString(engine->boardShape);
       }
       else {
         engine->setOrResetBoardSize(cfg,logger,seedRand,newXSize,newYSize,logger.isLoggingToStderr());
@@ -2061,141 +2069,6 @@ int MainCmds::gtp(const vector<string>& args) {
     }
 
 
-    else if(command == "loadsgf") {
-      if(pieces.size() != 1 && pieces.size() != 2) {
-        responseIsError = true;
-        response = "Expected one or two arguments for loadsgf but got '" + Global::concat(pieces," ") + "'";
-      }
-      else {
-        string filename = pieces[0];
-        bool parseFailed = false;
-        bool moveNumberSpecified = false;
-        int moveNumber = 0;
-        if(pieces.size() == 2) {
-          bool suc = Global::tryStringToInt(pieces[1],moveNumber);
-          moveNumber--;
-          if(!suc || moveNumber < 0 || moveNumber > 10000000)
-            parseFailed = true;
-          else {
-            moveNumberSpecified = true;
-          }
-        }
-        if(parseFailed) {
-          responseIsError = true;
-          response = "Invalid value for moveNumber for loadsgf";
-        }
-        else {
-          Board sgfInitialBoard;
-          Player sgfInitialNextPla;
-          BoardHistory sgfInitialHist;
-          Rules sgfRules;
-          Board sgfBoard;
-          Player sgfNextPla;
-          BoardHistory sgfHist;
-
-          bool sgfParseSuccess = false;
-          CompactSgf* sgf = NULL;
-          try {
-            sgf = CompactSgf::loadFile(filename);
-
-            if(sgf->moves.size() > 0x3FFFFFFF)
-              throw StringError("Sgf has too many moves");
-            if(!moveNumberSpecified || moveNumber > sgf->moves.size())
-              moveNumber = (int)sgf->moves.size();
-
-            sgfRules = sgf->getRulesOrWarn(
-              engine->getCurrentRules(), //Use current rules as default
-              [&logger](const string& msg) { logger.write(msg); cerr << msg << endl; }
-            );
-            if(engine->nnEval != NULL) {
-              bool rulesWereSupported;
-              Rules supportedRules = engine->nnEval->getSupportedRules(sgfRules,rulesWereSupported);
-              if(!rulesWereSupported) {
-                ostringstream out;
-                out << "WARNING: Rules " << sgfRules.toJsonString()
-                    << " from sgf not supported by neural net, using " << supportedRules.toJsonString() << " instead";
-                logger.write(out.str());
-                if(!logger.isLoggingToStderr())
-                  cerr << out.str() << endl;
-                sgfRules = supportedRules;
-              }
-            }
-
-
-            {
-              //See if the rules differ, IGNORING komi differences
-              Rules currentRules = engine->getCurrentRules();
-              if(sgfRules != currentRules) {
-                ostringstream out;
-                out << "Changing rules to " << sgfRules.toJsonString();
-                logger.write(out.str());
-                if(!logger.isLoggingToStderr())
-                  cerr << out.str() << endl;
-              }
-            }
-
-            sgf->setupInitialBoardAndHist(sgfRules, sgfInitialBoard, sgfInitialNextPla, sgfInitialHist);
-            sgfInitialHist.setInitialTurnNumber(sgfInitialBoard.numStonesOnBoard()); //Should give more accurate temperaure and time control behavior
-            sgfBoard = sgfInitialBoard;
-            sgfNextPla = sgfInitialNextPla;
-            sgfHist = sgfInitialHist;
-            sgf->playMovesTolerant(sgfBoard,sgfNextPla,sgfHist,moveNumber);
-
-            delete sgf;
-            sgf = NULL;
-            sgfParseSuccess = true;
-          }
-          catch(const StringError& err) {
-            delete sgf;
-            sgf = NULL;
-            responseIsError = true;
-            response = "Could not load sgf: " + string(err.what());
-          }
-          catch(...) {
-            delete sgf;
-            sgf = NULL;
-            responseIsError = true;
-            response = "Cannot load file";
-          }
-
-          if(sgfParseSuccess) {
-            engine->setOrResetBoardSize(cfg,logger,seedRand,sgfBoard.x_size,sgfBoard.y_size,logger.isLoggingToStderr());
-            engine->setPositionAndRules(sgfNextPla, sgfBoard, sgfHist, sgfInitialBoard, sgfInitialNextPla, sgfHist.moveHistory);
-          }
-        }
-      }
-    }
-
-    else if(command == "printsgf") {
-      if(pieces.size() != 0 && pieces.size() != 1) {
-        responseIsError = true;
-        response = "Expected zero or one argument for print but got '" + Global::concat(pieces," ") + "'";
-      }
-      else {
-        auto writeSgfToStream = [&](ostream& out) {
-          WriteSgf::writeSgf(out,"","",engine->bot->getRootHist(),NULL,true,false);
-        };
-
-        if(pieces.size() == 0 || pieces[0] == "-") {
-          ostringstream out;
-          writeSgfToStream(out);
-          response = out.str();
-        }
-        else {
-          ofstream out;
-          if(FileUtils::tryOpen(out,pieces[0])) {
-            writeSgfToStream(out);
-            out.close();
-            response = "";
-          }
-          else {
-            responseIsError = true;
-            response = "Could not open or write to file: " + pieces[0];
-          }
-        }
-      }
-    }
-
     else if(command == "analyze" || command == "lz-analyze" || command == "kata-analyze") {
       Player pla = engine->bot->getRootPla();
       bool parseFailed = false;
@@ -2233,7 +2106,10 @@ int MainCmds::gtp(const vector<string>& args) {
 
       if(!parsed) {
         responseIsError = true;
-        response = "Expected one argument 'all' or symmetry index [0-7] for kata-raw-nn but got '" + Global::concat(pieces," ") + "'";
+        response =
+          "Expected one argument 'all' or symmetry index [0-" +
+          Global::intToString(SymmetryHelpers::NUM_SYMMETRIES-1) +
+          "] for kata-raw-nn but got '" + Global::concat(pieces," ") + "'";
       }
       else {
         response = engine->rawNN(whichSymmetry);

@@ -19,6 +19,18 @@
 
 struct Board;
 
+enum class BoardShape : int8_t {
+  Y = 0,
+  ObtuseY = 1,
+  BentY = 2,
+};
+
+namespace BoardShapeIO {
+  std::string toString(BoardShape shape);
+  bool tryParse(const std::string& s, BoardShape& shape);
+  BoardShape parse(const std::string& s);
+}
+
 //Player
 typedef int8_t Player;
 static constexpr Player P_BLACK = 1;
@@ -106,6 +118,7 @@ struct Board
   static bool IS_ZOBRIST_INITALIZED;
   static Hash128 ZOBRIST_SIZE_X_HASH[MAX_LEN+1];
   static Hash128 ZOBRIST_SIZE_Y_HASH[MAX_LEN+1];
+  static Hash128 ZOBRIST_BOARD_SHAPE_HASH[3];
   static Hash128 ZOBRIST_BOARD_HASH[MAX_ARR_SIZE][4];
   static Hash128 ZOBRIST_MOVENUM_HASH[MAX_ARR_SIZE];
   static Hash128 ZOBRIST_LASTMOVE_HASH[MAX_ARR_SIZE];
@@ -125,6 +138,7 @@ struct Board
   //Constructors---------------------------------
   Board();  //Create Board of size (DEFAULT_LEN,DEFAULT_LEN)
   Board(int x, int y); //Create Board of size (x,y)
+  Board(int x, int y, BoardShape shape); //Create Board of size (x,y) with the given shape
   Board(const Board& other);
 
   Board& operator=(const Board&) = default;
@@ -134,6 +148,11 @@ struct Board
   bool isLegal(Loc loc, Player pla) const;
   //Check if this location is on the board
   bool isOnBoard(Loc loc) const;
+  bool isPlayablePoint(int x, int y) const;
+  int playableArea() const;
+  int sideMask(Loc loc) const;
+  int getAdjacentLocs(Loc loc, Loc buf[6]) const;
+  static bool isValidSizeForShape(int xSize, int ySize, BoardShape shape);
   //Is this board empty?
   bool isEmpty() const;
   //Count the number of stones on the board
@@ -166,7 +185,9 @@ struct Board
   bool isEqualForTesting(const Board& other) const;
 
   static Board parseBoard(int xSize, int ySize, const std::string& s);
+  static Board parseBoard(int xSize, int ySize, BoardShape shape, const std::string& s);
   static Board parseBoard(int xSize, int ySize, const std::string& s, char lineDelimiter);
+  static Board parseBoard(int xSize, int ySize, BoardShape shape, const std::string& s, char lineDelimiter);
   static void printBoard(std::ostream& out, const Board& board, Loc markLoc, const std::vector<Move>* hist);
   static std::string toStringSimple(const Board& board, char lineDelimiter);
   static nlohmann::json toJson(const Board& board);
@@ -176,6 +197,7 @@ struct Board
 
   int x_size;                  //Horizontal size of board
   int y_size;                  //Vertical size of board
+  BoardShape shape;            //Playable board geometry
   Color colors[MAX_ARR_SIZE];  //Color of each location on the board.
   int movenum; //how many moves
   int stonenum; //how many stones on board
@@ -184,10 +206,10 @@ struct Board
 
   Hash128 pos_hash; //A zobrist hash of the current board position (does not include ko point or player to move)
 
-  short adj_offsets[8]; //Indices 0-3: Offsets to add for adjacent points. Indices 4-7: Offsets for diagonal points. 2 and 3 are +x and +y.
+  short adj_offsets[8]; //Indices 0-5: Offsets to add for adjacent triangular-hex points. 2 and 3 are +x and +y.
 
   private:
-  void init(int xS, int yS);
+  void init(int xS, int yS, BoardShape boardShape);
 
   friend std::ostream& operator<<(std::ostream& out, const Board& board);
 

@@ -1,30 +1,43 @@
-# KataHex 2024
-Latest release: https://github.com/hzyhhzy/KataGo/releases/tag/Hex_20240908   
-~300 elo stronger than 2022 version on 19x19 board   
-New feature: Move number limitation    
-## Results
-The length of the optimal Hex game on n\*n board is about **0.45\*n^2** according to KataHex     
-https://dev.to/hzyhhzy/analysis-of-the-length-of-optimal-games-of-hex-game-using-alphazero-like-ai-16n7   
-Some conjectures of "Template problems" of Hex    
-https://mathoverflow.net/questions/470376/connection-properties-of-a-single-stone-on-an-infinite-hex-board
+# Kata-Y
 
+This branch adapts the KataGomo Hex codebase toward the game of Y.
 
-## Training schedule
-Scripts and parameters used in this run are in **./scripts**   
-   
-I will use **"RTX4090\*month"** or **"RTX4090\*day"** as the unit of training cost.    
-Total: **~6 RTX4090\*month**       
-    
+The intended board convention is the top-left triangular half of the Hex
+rhombus. On an `N = 14` board, legal human-facing cells are `a1` through `n1`,
+then `a2` through `m2`, and so on down to `a14`. In zero-indexed engine
+coordinates, playable cells satisfy:
 
-The major part of this run is on 15x15 board to save money. **(~4 RTX4090\*month)**   
-The cost of every selfplay game on n\*n board is **O(n^4)** (CNN cost \* move number). Consider that larger boards usually need more search visits per move, it can even reach **O(n^7)**.    
-At the end it was trained on 19x19.**(~1 RTX4090\*month)**   
-And finally 27x27 **(~3 RTX4090\*day)**    
-    
-By experience, if the largest board the model trained is n \* n, the model will play well on boards < 1.5n \* 1.5n.    
-For example, for a model trained only on 15x15 and smaller boards, it plays well on 19x19 but not 27x27. After a short training on 19x19, it plays well on 27x27. At the end I trained it on 27x27, so it can barely play on a 41x41 board.
-    
-Later I implemented **"Move number limitation"** and continued training with this.   
-On 15x15: **~4 RTX4090\*day**   
-On 19x19: **~7 RTX4090\*day**   
-On 27x27: **~4 RTX4090\*day** but failed. The winrate becomes weird and the reason is still unknown.
+```text
+x >= 0, y >= 0, and x + y < N
+```
+
+Y rules are simple: players alternately place stones, and a player wins when one
+connected group touches all three sides of the triangle. There is no scoring,
+capture, randomness, or strategic pass move. For compatibility with the inherited
+KataGomo pipeline, pass is accepted by the engine but immediately loses.
+
+## Building
+
+The engine requires CMake 3.18.2 or newer, a C++14 compiler, zlib, and the
+dependencies for one neural-network backend. Libzip is also required to write
+self-play training data. For example, on macOS with Homebrew, build the OpenCL
+backend with:
+
+```sh
+xcode-select --install
+brew install cmake libzip
+cmake -S cpp -B build-opencl -DUSE_BACKEND=OPENCL
+cmake --build build-opencl --parallel
+```
+
+The resulting executable is `build-opencl/katago`. On other systems, select
+`CUDA`, `TENSORRT`, `OPENCL`, or `EIGEN` as appropriate. See
+[Compiling.md](Compiling.md) for platform and backend dependencies.
+
+## Training
+
+The target training loop remains the standard KataGomo flow:
+
+```text
+self-play -> shuffle training data -> train network -> export model -> repeat
+```

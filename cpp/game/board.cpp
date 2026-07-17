@@ -13,13 +13,168 @@
 #include <vector>
 
 #include "../core/rand.h"
+#include "../game/benty.h"
 
 using namespace std;
+
+static bool isYPoint(int x, int y, int xSize, int ySize) {
+  return x >= 0 && y >= 0 && x < xSize && y < ySize && xSize == ySize && x + y < xSize;
+}
+
+static bool isObtuseYPoint(int x, int y, int xSize, int ySize) {
+  if(x < 0 || y < 0 || x >= xSize || y >= ySize || xSize != ySize || xSize <= 0 || xSize % 2 != 1)
+    return false;
+  int n = (xSize - 1) / 2;
+  int rx = xSize - 1 - x;
+  int ry = ySize - 1 - y;
+  bool inTopLeftCut = x < n && y < n && x + y < n;
+  bool inBottomRightCut = rx < n && ry < n && rx + ry < n;
+  return !inTopLeftCut && !inBottomRightCut;
+}
+
+static bool isPlayablePoint(BoardShape shape, int x, int y, int xSize, int ySize) {
+  switch(shape) {
+  case BoardShape::Y:
+    return isYPoint(x, y, xSize, ySize);
+  case BoardShape::ObtuseY:
+    return isObtuseYPoint(x, y, xSize, ySize);
+  case BoardShape::BentY:
+    return x >= 0 && y >= 0 && x < xSize && y < ySize && xSize == ySize &&
+      BentY::isSupportedTensorLen(xSize) && BentY::getTopology(xSize).playable[y * xSize + x];
+  default:
+    ASSERT_UNREACHABLE;
+    return false;
+  }
+}
+
+static bool isValidSizeForShape(BoardShape shape, int xSize, int ySize) {
+  switch(shape) {
+  case BoardShape::Y:
+    return xSize == ySize;
+  case BoardShape::ObtuseY:
+    return xSize == ySize && xSize > 0 && xSize % 2 == 1;
+  case BoardShape::BentY:
+    return xSize == ySize && BentY::isSupportedTensorLen(xSize);
+  default:
+    ASSERT_UNREACHABLE;
+    return false;
+  }
+}
+
+static int playableArea(BoardShape shape, int xSize, int ySize) {
+  switch(shape) {
+  case BoardShape::Y:
+    assert(xSize == ySize);
+    return xSize * (xSize + 1) / 2;
+  case BoardShape::ObtuseY: {
+    assert(isValidSizeForShape(shape, xSize, ySize));
+    int n = (xSize - 1) / 2;
+    return xSize * ySize - n * (n + 1);
+  }
+  case BoardShape::BentY: {
+    assert(isValidSizeForShape(shape, xSize, ySize));
+    const vector<bool>& playable = BentY::getTopology(xSize).playable;
+    return (int)count(playable.begin(), playable.end(), true);
+  }
+  default:
+    ASSERT_UNREACHABLE;
+    return 0;
+  }
+}
+
+static int sideMask(BoardShape shape, int x, int y, int xSize, int ySize) {
+  switch(shape) {
+  case BoardShape::Y: {
+    assert(isYPoint(x, y, xSize, ySize));
+    int sidesTouched = 0;
+    if(y == 0)
+      sidesTouched |= 1;
+    if(x == 0)
+      sidesTouched |= 2;
+    if(x + y == xSize - 1)
+      sidesTouched |= 4;
+    return sidesTouched;
+  }
+  case BoardShape::ObtuseY: {
+    assert(isObtuseYPoint(x, y, xSize, ySize));
+    int n = (xSize - 1) / 2;
+    int sidesTouched = 0;
+    if((y == 0 && x >= n) || (x == xSize - 1 && y <= n))
+      sidesTouched |= 1;
+    if((x + y == n) || (x == 0 && y >= n))
+      sidesTouched |= 2;
+    if((y == ySize - 1 && x <= n) || ((xSize - 1 - x) + (ySize - 1 - y) == n))
+      sidesTouched |= 4;
+    return sidesTouched;
+  }
+  case BoardShape::BentY:
+    assert(isPlayablePoint(shape, x, y, xSize, ySize));
+    return BentY::getTopology(xSize).sideMasks[y * xSize + x];
+  default:
+    ASSERT_UNREACHABLE;
+    return 0;
+  }
+}
+
+static int printableColumnsInRow(BoardShape shape, int xSize, int ySize, int y) {
+  switch(shape) {
+  case BoardShape::Y:
+    (void)ySize;
+    return xSize - y;
+  case BoardShape::ObtuseY:
+  case BoardShape::BentY:
+    (void)ySize;
+    (void)y;
+    return xSize;
+  default:
+    ASSERT_UNREACHABLE;
+    return 0;
+  }
+}
+
+string BoardShapeIO::toString(BoardShape shape) {
+  switch(shape) {
+  case BoardShape::Y:
+    return "y";
+  case BoardShape::ObtuseY:
+    return "obtuseY";
+  case BoardShape::BentY:
+    return "bentY";
+  default:
+    ASSERT_UNREACHABLE;
+    return "";
+  }
+}
+
+bool BoardShapeIO::tryParse(const string& s, BoardShape& shape) {
+  string lower = Global::toLower(s);
+  if(lower == "y") {
+    shape = BoardShape::Y;
+    return true;
+  }
+  if(lower == "obtusey") {
+    shape = BoardShape::ObtuseY;
+    return true;
+  }
+  if(lower == "benty") {
+    shape = BoardShape::BentY;
+    return true;
+  }
+  return false;
+}
+
+BoardShape BoardShapeIO::parse(const string& s) {
+  BoardShape shape;
+  if(tryParse(s, shape))
+    return shape;
+  throw StringError("Could not parse board shape: " + s);
+}
 
 //STATIC VARS-----------------------------------------------------------------------------
 bool Board::IS_ZOBRIST_INITALIZED = false;
 Hash128 Board::ZOBRIST_SIZE_X_HASH[MAX_LEN+1];
 Hash128 Board::ZOBRIST_SIZE_Y_HASH[MAX_LEN+1];
+Hash128 Board::ZOBRIST_BOARD_SHAPE_HASH[3];
 Hash128 Board::ZOBRIST_BOARD_HASH[MAX_ARR_SIZE][4];
 Hash128 Board::ZOBRIST_PLAYER_HASH[4];
 Hash128 Board::ZOBRIST_MOVENUM_HASH[MAX_ARR_SIZE];
@@ -45,7 +200,7 @@ int Location::getY(Loc loc, int x_size)
 }
 void Location::getAdjacentOffsets(short adj_offsets[8], int x_size)
 {
-  //first 6 are connections on Hex board
+  //first 6 are connections on the triangular hex grid
   adj_offsets[0] = -(x_size+1);
   adj_offsets[1] = -1;
   adj_offsets[2] = 1;
@@ -58,27 +213,25 @@ void Location::getAdjacentOffsets(short adj_offsets[8], int x_size)
 
 bool Location::isAdjacent(Loc loc0, Loc loc1, int x_size)
 {
-  return loc0 == loc1 - (x_size+1) || loc0 == loc1 - 1 || loc0 == loc1 + 1 || loc0 == loc1 + (x_size+1);
+  return loc0 == loc1 - (x_size+1) || loc0 == loc1 - 1 || loc0 == loc1 + 1 || loc0 == loc1 + (x_size+1) ||
+         loc0 == loc1 - (x_size+1) + 1 || loc0 == loc1 + (x_size+1) - 1;
 }
-
-
-
-#define FOREACHADJ(BLOCK) {int ADJOFFSET = -(x_size+1); {BLOCK}; ADJOFFSET = -1; {BLOCK}; ADJOFFSET = 1; {BLOCK}; ADJOFFSET = x_size+1; {BLOCK}};
-#define ADJ0 (-(x_size+1))
-#define ADJ1 (-1)
-#define ADJ2 (1)
-#define ADJ3 (x_size+1)
 
 //CONSTRUCTORS AND INITIALIZATION----------------------------------------------------------
 
 Board::Board()
 {
-  init(DEFAULT_LEN,DEFAULT_LEN);
+  init(DEFAULT_LEN,DEFAULT_LEN,BoardShape::Y);
 }
 
 Board::Board(int x, int y)
 {
-  init(x,y);
+  init(x,y,BoardShape::Y);
+}
+
+Board::Board(int x, int y, BoardShape boardShape)
+{
+  init(x,y,boardShape);
 }
 
 
@@ -86,6 +239,7 @@ Board::Board(const Board& other)
 {
   x_size = other.x_size;
   y_size = other.y_size;
+  shape = other.shape;
 
   memcpy(colors, other.colors, sizeof(Color)*MAX_ARR_SIZE);
 
@@ -96,14 +250,17 @@ Board::Board(const Board& other)
   memcpy(adj_offsets, other.adj_offsets, sizeof(short)*8);
 }
 
-void Board::init(int xS, int yS)
+void Board::init(int xS, int yS, BoardShape boardShape)
 {
   assert(IS_ZOBRIST_INITALIZED);
   if(xS < 0 || yS < 0 || xS > MAX_LEN || yS > MAX_LEN)
     throw StringError("Board::init - invalid board size");
+  if(!::isValidSizeForShape(boardShape, xS, yS))
+    throw StringError("Board::init - invalid board size for " + BoardShapeIO::toString(boardShape));
 
   x_size = xS;
   y_size = yS;
+  shape = boardShape;
 
   for(int i = 0; i < MAX_ARR_SIZE; i++)
     colors[i] = C_WALL;
@@ -116,12 +273,13 @@ void Board::init(int xS, int yS)
     for(int x = 0; x < x_size; x++)
     {
       Loc loc = (x+1) + (y+1)*(x_size+1);
-      colors[loc] = C_EMPTY;
+      if(isPlayablePoint(x,y))
+        colors[loc] = C_EMPTY;
       // empty_list.add(loc);
     }
   }
 
-  pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size];
+  pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size] ^ ZOBRIST_BOARD_SHAPE_HASH[(int)shape];
 
   Location::getAdjacentOffsets(adj_offsets,x_size);
 }
@@ -169,6 +327,8 @@ void Board::initHash()
     ZOBRIST_SIZE_X_HASH[i] = nextHash();
     ZOBRIST_SIZE_Y_HASH[i] = nextHash();
   }
+  for(int i = 0; i<3; i++)
+    ZOBRIST_BOARD_SHAPE_HASH[i] = nextHash();
 
   //Reseed and compute one more set of zobrist hashes, mixed a bit differently
   rand.init("Board::initHash() for second set of ZOBRIST hashes");
@@ -188,6 +348,45 @@ bool Board::isOnBoard(Loc loc) const {
   return loc >= 0 && loc < MAX_ARR_SIZE && colors[loc] != C_WALL;
 }
 
+bool Board::isPlayablePoint(int x, int y) const {
+  return ::isPlayablePoint(shape, x, y, x_size, y_size);
+}
+
+int Board::playableArea() const {
+  return ::playableArea(shape, x_size, y_size);
+}
+
+int Board::sideMask(Loc loc) const {
+  int x = Location::getX(loc, x_size);
+  int y = Location::getY(loc, x_size);
+  if(!isPlayablePoint(x, y))
+    return 0;
+  return ::sideMask(shape, x, y, x_size, y_size);
+}
+
+int Board::getAdjacentLocs(Loc loc, Loc buf[6]) const {
+  if(!isOnBoard(loc))
+    return 0;
+  if(shape == BoardShape::BentY) {
+    int x = Location::getX(loc,x_size);
+    int y = Location::getY(loc,x_size);
+    int pos = y * x_size + x;
+    const vector<int>& adjacent = BentY::getTopology(x_size).neighbors[pos];
+    for(int i = 0; i < (int)adjacent.size(); i++) {
+      int adjPos = adjacent[i];
+      buf[i] = Location::getLoc(adjPos % x_size, adjPos / x_size, x_size);
+    }
+    return (int)adjacent.size();
+  }
+  for(int i = 0; i < 6; i++)
+    buf[i] = loc + adj_offsets[i];
+  return 6;
+}
+
+bool Board::isValidSizeForShape(int xSize, int ySize, BoardShape shape) {
+  return ::isValidSizeForShape(shape, xSize, ySize);
+}
+
 //Check if moving here is illegal.
 bool Board::isLegal(Loc loc, Player pla) const
 {
@@ -196,7 +395,7 @@ bool Board::isLegal(Loc loc, Player pla) const
   return loc == PASS_LOC || (
     loc >= 0 &&
     loc < MAX_ARR_SIZE &&
-    (colors[loc] == C_EMPTY) 
+    (colors[loc] == C_EMPTY)
   );
 }
 
@@ -204,7 +403,7 @@ bool Board::isEmpty() const {
   for(int y = 0; y < y_size; y++) {
     for(int x = 0; x < x_size; x++) {
       Loc loc = Location::getLoc(x,y,x_size);
-      if(colors[loc] != C_EMPTY)
+      if(colors[loc] == C_BLACK || colors[loc] == C_WHITE)
         return false;
     }
   }
@@ -290,7 +489,9 @@ void Board::playMoveAssumeLegal(Loc loc, Player pla)
   {
     return;
   }
-  setStone(loc, pla);
+  bool suc = setStone(loc, pla);
+  assert(suc);
+  (void)suc;
 
 }
 
@@ -309,12 +510,11 @@ void Board::checkConsistency() const {
 
 
   vector<Loc> buf;
-  Hash128 tmp_pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size];
-  int emptyCount = 0;
+  Hash128 tmp_pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size] ^ ZOBRIST_BOARD_SHAPE_HASH[(int)shape];
   for(Loc loc = 0; loc < MAX_ARR_SIZE; loc++) {
     int x = Location::getX(loc,x_size);
     int y = Location::getY(loc,x_size);
-    if(x < 0 || x >= x_size || y < 0 || y >= y_size) {
+    if(x < 0 || x >= x_size || y < 0 || y >= y_size || !isPlayablePoint(x,y)) {
       if(colors[loc] != C_WALL)
         throw StringError(errLabel + "Non-WALL value outside of board legal area");
     }
@@ -323,10 +523,7 @@ void Board::checkConsistency() const {
         tmp_pos_hash ^= ZOBRIST_BOARD_HASH[loc][colors[loc]];
         tmp_pos_hash ^= ZOBRIST_BOARD_HASH[loc][C_EMPTY];
       }
-      else if(colors[loc] == C_EMPTY) {
-        emptyCount += 1;
-      }
-      else
+      else if(colors[loc] != C_EMPTY)
         throw StringError(errLabel + "Non-(black,white,empty) value within board legal area");
     }
   }
@@ -353,6 +550,8 @@ bool Board::isEqualForTesting(const Board& other) const {
   if(x_size != other.x_size)
     return false;
   if(y_size != other.y_size)
+    return false;
+  if(shape != other.shape)
     return false;
   if(pos_hash != other.pos_hash)
     return false;
@@ -428,59 +627,80 @@ string Location::toStringMach(Loc loc, int x_size)
     return string("null");
 
   int x = getX(loc, x_size), y = getY(loc, x_size);
-  int x_print = 2 * x + y + 1, y_print = 2 * y + 1;
 
   char buf[128];
-  sprintf(buf, "(%d,%d)", x_print, y_print);
+  snprintf(buf, sizeof(buf), "(%d,%d)", x, y);
   return string(buf);
 }
 
-string Location::toString(Loc loc, int x_size, int y_size)
+static string humanLettersForX(int x) {
+  string s;
+  int col = x + 1;
+  while(col > 0) {
+    col -= 1;
+    s += (char)('a' + (col % 26));
+    col /= 26;
+  }
+  std::reverse(s.begin(), s.end());
+  return s;
+}
+
+static bool isHumanCoordLetter(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static bool tryParseHumanLetters(const string& s, size_t& pos, int& x) {
+  size_t start = pos;
+  int col = 0;
+  while(pos < s.length() && isHumanCoordLetter(s[pos])) {
+    char c = s[pos];
+    if(c >= 'A' && c <= 'Z')
+      c = (char)(c - 'A' + 'a');
+    col = col * 26 + (c - 'a' + 1);
+    pos++;
+  }
+  if(pos == start)
+    return false;
+  x = col - 1;
+  return true;
+}
+
+static bool rowLooksSpaced(const string& line, int columns) {
+  if(columns <= 0 || line.length() != (size_t)(2 * columns - 1))
+    return false;
+  for(size_t i = 1; i < line.length(); i += 2)
+    if(line[i] != ' ')
+      return false;
+  return true;
+}
+
+static string locationToString(Loc loc, int x_size, int y_size, BoardShape shape)
 {
-  if(x_size > 25 * 5 || y_size > 25 * 5)
-    return toStringMach(loc,x_size);
   if(loc == Board::PASS_LOC)
     return string("pass");
   if(loc == Board::NULL_LOC)
     return string("null");
-  const char* xChar = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
-  int x = getX(loc,x_size);
-  int y = getY(loc,x_size);
-  if(x >= x_size || x < 0 || y < 0 || y >= y_size)
-    return toStringMach(loc,x_size);
-  int x_print = 2 * x + y + 1, y_print = 2 * y + 1, y_size_print = y_size * 2 + 1;
+  int x = Location::getX(loc,x_size);
+  int y = Location::getY(loc,x_size);
+  if(!isPlayablePoint(shape,x,y,x_size,y_size))
+    return Location::toStringMach(loc,x_size);
+  return humanLettersForX(x) + std::to_string(y + 1);
+}
 
-  char buf[128];
-  if(x_print <= 24)
-    sprintf(buf, "%c%d", xChar[x_print], y_size_print - y_print);
-  else
-    sprintf(buf, "%c%c%d", xChar[x_print / 25 - 1], xChar[x_print % 25], y_size_print - y_print);
-  return string(buf);
+string Location::toString(Loc loc, int x_size, int y_size)
+{
+  return locationToString(loc, x_size, y_size, BoardShape::Y);
 }
 
 string Location::toString(Loc loc, const Board& b) {
-  return toString(loc,b.x_size,b.y_size);
+  return locationToString(loc,b.x_size,b.y_size,b.shape);
 }
 
 string Location::toStringMach(Loc loc, const Board& b) {
   return toStringMach(loc,b.x_size);
 }
 
-static bool tryParseLetterCoordinate(char c, int& x) {
-  if(c >= 'A' && c <= 'H')
-    x = c-'A';
-  else if(c >= 'a' && c <= 'h')
-    x = c-'a';
-  else if(c >= 'J' && c <= 'Z')
-    x = c-'A'-1;
-  else if(c >= 'j' && c <= 'z')
-    x = c-'a'-1;
-  else
-    return false;
-  return true;
-}
-
-bool Location::tryOfString(const string& str, int x_size, int y_size, Loc& result) {
+static bool tryLocationOfString(const string& str, int x_size, int y_size, BoardShape shape, Loc& result) {
   string s = Global::trim(str);
   if(s.length() < 2)
     return false;
@@ -501,50 +721,32 @@ bool Location::tryOfString(const string& str, int x_size, int y_size, Loc& resul
     bool sucY = Global::tryStringToInt(pieces[1],y);
     if(!sucX || !sucY)
       return false;
-    if(y % 2 == 0)
-      return false;
-    y = (y - 1) / 2;
-    if((x - y) % 2 == 0)
-      return false;
-    x = (x - y - 1) / 2;
-    if(x < 0 || y < 0 || x >= x_size || y >= y_size)
+    if(!isPlayablePoint(shape,x,y,x_size,y_size))
       return false;
     result = Location::getLoc(x,y,x_size);
     return true;
   }
   else {
     int x;
-    if(!tryParseLetterCoordinate(s[0],x))
+    size_t pos = 0;
+    if(!tryParseHumanLetters(s,pos,x))
       return false;
-
-    //Extended format
-    if((s[1] >= 'A' && s[1] <= 'Z') || (s[1] >= 'a' && s[1] <= 'z')) {
-      int x1;
-      if(!tryParseLetterCoordinate(s[1],x1))
-        return false;
-      x = (x+1) * 25 + x1;
-      s = s.substr(2,s.length()-2);
-    }
-    else {
-      s = s.substr(1,s.length()-1);
-    }
+    s = s.substr(pos,s.length()-pos);
 
     int y;
     bool sucY = Global::tryStringToInt(s,y);
     if(!sucY)
       return false;
-    y = y_size * 2 + 1 - y;
-    if(y % 2 == 0)
-      return false;
-    y = (y - 1) / 2;
-    if((x - y) % 2 == 0)
-      return false;
-    x = (x - y - 1) / 2;
-    if(x < 0 || y < 0 || x >= x_size || y >= y_size)
+    y -= 1;
+    if(!isPlayablePoint(shape,x,y,x_size,y_size))
       return false;
     result = Location::getLoc(x,y,x_size);
     return true;
   }
+}
+
+bool Location::tryOfString(const string& str, int x_size, int y_size, Loc& result) {
+  return tryLocationOfString(str, x_size, y_size, BoardShape::Y, result);
 }
 
 bool Location::tryOfStringAllowNull(const string& str, int x_size, int y_size, Loc& result) {
@@ -556,11 +758,15 @@ bool Location::tryOfStringAllowNull(const string& str, int x_size, int y_size, L
 }
 
 bool Location::tryOfString(const string& str, const Board& b, Loc& result) {
-  return tryOfString(str,b.x_size,b.y_size,result);
+  return tryLocationOfString(str,b.x_size,b.y_size,b.shape,result);
 }
 
 bool Location::tryOfStringAllowNull(const string& str, const Board& b, Loc& result) {
-  return tryOfStringAllowNull(str,b.x_size,b.y_size,result);
+  if(str == "null") {
+    result = Board::NULL_LOC;
+    return true;
+  }
+  return tryOfString(str,b,result);
 }
 
 Loc Location::ofString(const string& str, int x_size, int y_size) {
@@ -578,12 +784,18 @@ Loc Location::ofStringAllowNull(const string& str, int x_size, int y_size) {
 }
 
 Loc Location::ofString(const string& str, const Board& b) {
-  return ofString(str,b.x_size,b.y_size);
+  Loc result;
+  if(tryOfString(str,b,result))
+    return result;
+  throw StringError("Could not parse board location: " + str);
 }
 
 
 Loc Location::ofStringAllowNull(const string& str, const Board& b) {
-  return ofStringAllowNull(str,b.x_size,b.y_size);
+  Loc result;
+  if(tryOfStringAllowNull(str,b,result))
+    return result;
+  throw StringError("Could not parse board location: " + str);
 }
 
 vector<Loc> Location::parseSequence(const string& str, const Board& board) {
@@ -604,16 +816,22 @@ void Board::printBoard(ostream& out, const Board& board, Loc markLoc, const vect
   out << "HASH: " << board.pos_hash << "\n";
   bool showCoords = board.x_size <= 50 && board.y_size <= 50;
   if(showCoords) {
-    const char* xChar = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
-    out << "  ";
+    if(humanLettersForX(board.x_size-1).length() > 1) {
+      out << "   ";
+      for(int x = 0; x < board.x_size; x++) {
+        string column = humanLettersForX(x);
+        out << (column.length() > 1 ? column[0] : ' ');
+        if(x < board.x_size-1)
+          out << ' ';
+      }
+      out << "\n";
+    }
+    out << "   ";
     for(int x = 0; x < board.x_size; x++) {
-      if(x <= 24) {
+      string column = humanLettersForX(x);
+      out << column[column.length()-1];
+      if(x < board.x_size-1)
         out << " ";
-        out << xChar[x];
-      }
-      else {
-        out << "A" << xChar[x-25];
-      }
     }
     out << "\n";
   }
@@ -622,10 +840,14 @@ void Board::printBoard(ostream& out, const Board& board, Loc markLoc, const vect
   {
     if(showCoords) {
       char buf[16];
-      sprintf(buf,"%2d",board.y_size-y);
+      snprintf(buf, sizeof(buf), "%2d", y+1);
       out << buf << ' ';
     }
-    for(int x = 0; x < board.x_size; x++)
+    for(int i = 0; i < y; i++)
+      out << ' ';
+
+    int playableWidth = printableColumnsInRow(board.shape, board.x_size, board.y_size, y);
+    for(int x = 0; x < playableWidth; x++)
     {
       Loc loc = Location::getLoc(x,y,board.x_size);
       char s = PlayerIO::colorToChar(board.colors[loc]);
@@ -646,7 +868,7 @@ void Board::printBoard(ostream& out, const Board& board, Loc markLoc, const vect
         }
       }
 
-      if(x < board.x_size-1 && !histMarked)
+      if(x < playableWidth-1 && !histMarked)
         out << ' ';
     }
     out << "\n";
@@ -676,12 +898,20 @@ Board Board::parseBoard(int xSize, int ySize, const string& s) {
   return parseBoard(xSize,ySize,s,'\n');
 }
 
+Board Board::parseBoard(int xSize, int ySize, BoardShape shape, const string& s) {
+  return parseBoard(xSize,ySize,shape,s,'\n');
+}
+
 Board Board::parseBoard(int xSize, int ySize, const string& s, char lineDelimiter) {
-  Board board(xSize,ySize);
+  return parseBoard(xSize,ySize,BoardShape::Y,s,lineDelimiter);
+}
+
+Board Board::parseBoard(int xSize, int ySize, BoardShape shape, const string& s, char lineDelimiter) {
+  Board board(xSize,ySize,shape);
   vector<string> lines = Global::split(Global::trim(s),lineDelimiter);
 
   //Throw away coordinate labels line if it exists
-  if(lines.size() == ySize+1 && Global::isPrefix(lines[0],"A"))
+  if(lines.size() == ySize+1 && Global::isPrefix(Global::toLower(Global::trim(lines[0])),"a"))
     lines.erase(lines.begin());
 
   if(lines.size() != ySize)
@@ -696,17 +926,56 @@ Board Board::parseBoard(int xSize, int ySize, const string& s, char lineDelimite
     line.erase(0,firstNonDigitIdx);
     line = Global::trim(line);
 
-    if(line.length() != xSize && line.length() != 2*xSize-1)
+    int playableWidth = printableColumnsInRow(shape, xSize, ySize, y);
+    bool rectangularNoSpaces = line.length() == (size_t)xSize;
+    bool rectangularSpaced = rowLooksSpaced(line,xSize);
+    bool triangularNoSpaces = line.length() == (size_t)playableWidth;
+    bool triangularSpaced = rowLooksSpaced(line,playableWidth);
+    if(!rectangularNoSpaces && !rectangularSpaced && !triangularNoSpaces && !triangularSpaced)
       throw StringError("Board::parseBoard - line length not compatible with xSize");
 
-    for(int x = 0; x<xSize; x++) {
+    bool spaced = false;
+    int columnsToRead = xSize;
+    if(triangularSpaced && (!rectangularSpaced || playableWidth != xSize)) {
+      spaced = true;
+      columnsToRead = playableWidth;
+    }
+    else if(rectangularSpaced) {
+      spaced = true;
+      columnsToRead = xSize;
+    }
+    else if(triangularNoSpaces && (!rectangularNoSpaces || playableWidth != xSize)) {
+      spaced = false;
+      columnsToRead = playableWidth;
+    }
+    else if(rectangularNoSpaces) {
+      spaced = false;
+      columnsToRead = xSize;
+    }
+    else if(triangularSpaced) {
+      spaced = true;
+      columnsToRead = playableWidth;
+    }
+    else if(triangularNoSpaces) {
+      spaced = false;
+      columnsToRead = playableWidth;
+    }
+    for(int x = 0; x<columnsToRead; x++) {
       char c;
-      if(line.length() == xSize)
+      if(!spaced)
         c = line[x];
       else
         c = line[x*2];
 
       Loc loc = Location::getLoc(x,y,board.x_size);
+      if(!board.isPlayablePoint(x,y)) {
+        if(c != '#')
+          throw StringError(string("Board::parseBoard - non-wall character outside playable area near ") + Location::toStringMach(loc,board));
+        continue;
+      }
+      if(c == '#') {
+        throw StringError(string("Board::parseBoard - wall on playable point near ") + Location::toString(loc,board));
+      }
       if(c == '.' || c == ' ' || c == '*' || c == ',' || c == '`')
         continue;
       else if(c == 'o' || c == 'O') {
@@ -730,6 +999,7 @@ nlohmann::json Board::toJson(const Board& board) {
   nlohmann::json data;
   data["xSize"] = board.x_size;
   data["ySize"] = board.y_size;
+  data["shape"] = BoardShapeIO::toString(board.shape);
   data["stones"] = Board::toStringSimple(board,'|');
   return data;
 }
@@ -737,7 +1007,7 @@ nlohmann::json Board::toJson(const Board& board) {
 Board Board::ofJson(const nlohmann::json& data) {
   int xSize = data["xSize"].get<int>();
   int ySize = data["ySize"].get<int>();
-  Board board = Board::parseBoard(xSize,ySize,data["stones"].get<string>(),'|');
+  BoardShape shape = BoardShapeIO::parse(data["shape"].get<string>());
+  Board board = Board::parseBoard(xSize,ySize,shape,data["stones"].get<string>(),'|');
   return board;
 }
-

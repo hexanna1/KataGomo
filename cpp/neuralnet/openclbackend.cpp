@@ -2806,7 +2806,10 @@ void NeuralNet::getOutput(
     const float* rowGlobal = inputBufs[nIdx]->rowGlobal;
     const float* rowSpatial = inputBufs[nIdx]->rowSpatial;
     std::copy(rowGlobal,rowGlobal+numGlobalFeatures,rowGlobalInput);
-    SymmetryHelpers::copyInputsWithSymmetry(rowSpatial, rowSpatialInput, 1, nnYLen, nnXLen, numSpatialFeatures, gpuHandle->inputsUseNHWC, inputBufs[nIdx]->symmetry);
+    SymmetryHelpers::copyInputsWithSymmetry(
+      rowSpatial, rowSpatialInput, 1, nnYLen, nnXLen, numSpatialFeatures, gpuHandle->inputsUseNHWC,
+      inputBufs[nIdx]->symmetry, inputBufs[nIdx]->boardShapeForServer, inputBufs[nIdx]->boardXSizeForServer, inputBufs[nIdx]->boardYSizeForServer
+    );
   }
 
   Buffers* buffers = gpuHandle->buffers.get();
@@ -2987,7 +2990,10 @@ void NeuralNet::getOutput(
     //These are not actually correct, the client does the postprocessing to turn them into
     //policy probabilities and white game outcome probabilities
     //Also we don't fill in the nnHash here either
-    SymmetryHelpers::copyOutputsWithSymmetry(policySrcBuf, policyProbs, 1, nnYLen, nnXLen, inputBufs[row]->symmetry);
+    SymmetryHelpers::copyOutputsWithSymmetry(
+      policySrcBuf, policyProbs, 1, nnYLen, nnXLen,
+      inputBufs[row]->symmetry, inputBufs[row]->boardShapeForServer, inputBufs[row]->boardXSizeForServer, inputBufs[row]->boardYSizeForServer
+    );
     policyProbs[inputBuffers->singlePolicyResultElts] = inputBuffers->policyPassResults[row];
 
     int numValueChannels = gpuHandle->model->numValueChannels;

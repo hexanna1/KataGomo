@@ -88,9 +88,8 @@ Hash128 LocalPatternHasher::getHashWithSym(const Board& board, Loc loc, Player p
     int xCenter = xSize/2;
     int yCenter = ySize/2;
 
-    bool transpose = SymmetryHelpers::isTranspose(symmetry);
-    bool flipX = SymmetryHelpers::isFlipX(symmetry);
-    bool flipY = SymmetryHelpers::isFlipY(symmetry);
+    assert(symmetry == 0);
+    (void)symmetry;
 
     int x = Location::getX(loc,board.x_size);
     int y = Location::getY(loc,board.x_size);
@@ -103,16 +102,7 @@ Hash128 LocalPatternHasher::getHashWithSym(const Board& board, Loc loc, Player p
         int y2 = dy + yCenter;
         int x2 = dx + xCenter;
 
-        int symXY2;
-        int symX2 = flipX ? xSize - x2 - 1 : x2;
-        int symY2 = flipY ? ySize - y2 - 1 : y2;
-        if(transpose) {
-          std::swap(symX2,symY2);
-          symXY2 = symY2 * ySize + symX2;
-        }
-        else {
-          symXY2 = symY2 * xSize + symX2;
-        }
+        int symXY2 = y2 * xSize + x2;
 
         int symColor;
         if(board.colors[loc2] == P_BLACK || board.colors[loc2] == P_WHITE)

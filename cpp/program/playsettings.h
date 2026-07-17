@@ -57,9 +57,8 @@ struct PlaySettings {
 
   //special openings
   double completelyRandomOpeningProb;//randomly put some stones on the board
-  double completelyRandomOpeningFillRateAvg;  // avg fill rate of random stones (15x15 board, ~225*p black stones and
-                                              // ~225*p white stones)
-  double specialOpeningProb;  //Gale board, or many positions never shows in normal games
+  double completelyRandomOpeningFillRateAvg;  // avg fill rate over playable triangular cells
+  double specialOpeningProb;  // extra random-fill opening path; normally disabled for early Y runs
 
 
   //Enable full data recording and a variety of other minor tweaks applying only for self-play training.
