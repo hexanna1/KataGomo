@@ -23,6 +23,7 @@ cpp/out
 /scripts/*/backups*/
 /scripts/*/gtp_logs*/
 /scripts/**/*.py
+!/scripts/play_*.py
 /gtp_logs/
 *.md
 !/THIRD_PARTY_NOTICES.md
