@@ -220,7 +220,7 @@ bool Search::getPlaySelectionValues(
     bool obeyAllowedRootMove = true;
     while(true) {
       for(int movePos = 0; movePos<policySize; movePos++) {
-        Loc moveLoc = NNPos::posToLoc(movePos,rootBoard.x_size,rootBoard.y_size,nnXLen,nnYLen);
+        Loc moveLoc = NNPos::posToLoc(movePos,rootBoard,nnXLen,nnYLen);
         const float* policyProbs = nnOutput->getPolicyProbsMaybeNoised();
         double policyProb = policyProbs[movePos];
         if(!rootHistory.isLegal(rootBoard,moveLoc,rootPla) || policyProb < 0 || (obeyAllowedRootMove && !isAllowedRootMove(moveLoc)))
@@ -522,10 +522,14 @@ void Search::printRootPolicyMap(ostream& out) const {
     return;
 
   const float* policyProbs = nnOutput->getPolicyProbsMaybeNoised();
-  for(int y = 0; y<rootBoard.y_size; y++) {
-    for(int x = 0; x<rootBoard.x_size; x++) {
+  int tensorBoardLen = 2 * rootBoard.x_size - 1;
+  for(int y = 0; y < tensorBoardLen; y++) {
+    for(int x = 0; x < tensorBoardLen; x++) {
       int pos = NNPos::xyToPos(x,y,nnOutput->nnXLen);
-      out << Global::strprintf("%6.1f ", policyProbs[pos]*100);
+      if(policyProbs[pos] >= 0)
+        out << Global::strprintf("%6.1f ",policyProbs[pos]*100);
+      else
+        out << "     - ";
     }
     out << endl;
   }
@@ -857,7 +861,7 @@ void Search::getAnalysisData(
       if(bestPos < 0 || bestPolicy < 0.0)
         break;
 
-      Loc bestMove = NNPos::posToLoc(bestPos,rootBoard.x_size,rootBoard.y_size,nnXLen,nnYLen);
+      Loc bestMove = NNPos::posToLoc(bestPos,rootBoard,nnXLen,nnYLen);
       AnalysisData data = getAnalysisDataOfSingleChild(
         NULL, 0, scratchLocs, scratchValues, bestMove, bestPolicy, fpuValue, parentUtility, parentWinLossValue,
         maxPVDepth
@@ -1265,16 +1269,16 @@ bool Search::getAnalysisJson(
     if(!suc)
       return false;
     json policy = json::array();
-    for(int y = 0; y < board.y_size; y++) {
-      for(int x = 0; x < board.x_size; x++) {
-        int pos = NNPos::xyToPos(x, y, nnXLen);
-        policy.push_back(Global::roundDynamic(policyProbs[pos],OUTPUT_PRECISION));
-      }
+    int tensorBoardLen = 2 * board.x_size - 1;
+    for(int y = 0; y < tensorBoardLen; y++) {
+      for(int x = 0; x < tensorBoardLen; x++)
+        policy.push_back(Global::roundDynamic(policyProbs[NNPos::xyToPos(x,y,nnXLen)],OUTPUT_PRECISION));
     }
 
-    int passPos = NNPos::locToPos(Board::PASS_LOC, board.x_size, nnXLen, nnYLen);
+    int passPos = NNPos::locToPos(Board::PASS_LOC,board,nnXLen,nnYLen);
     policy.push_back(Global::roundDynamic(policyProbs[passPos],OUTPUT_PRECISION));
     ret["policy"] = policy;
+    ret["policyTensorSize"] = tensorBoardLen;
   }
 
 

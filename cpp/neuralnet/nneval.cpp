@@ -12,6 +12,7 @@ NNResultBuf::NNResultBuf()
     hasResult(false),
     boardXSizeForServer(0),
     boardYSizeForServer(0),
+    quaxVariantForServer(QuaxVariant::DoubleCrosscut),
     rowSpatialSize(0),
     rowGlobalSize(0),
     rowSpatial(NULL),
@@ -120,6 +121,8 @@ NNEvaluator::NNEvaluator(
    m_currentResultBufsIdx(0),
    m_oldestResultBufsIdx(0)
 {
+  if(nnXLen != nnYLen)
+    throw StringError("Quax neural-net tensors must be square");
   if(nnXLen > NNPos::MAX_BOARD_LEN)
     throw StringError("Maximum supported nnEval board size is " + Global::intToString(NNPos::MAX_BOARD_LEN));
   if(nnYLen > NNPos::MAX_BOARD_LEN)
@@ -471,13 +474,12 @@ void NNEvaluator::serve(
         //At this point, these aren't probabilities, since this is before the postprocessing
         //that happens for each result. These just need to be unnormalized log probabilities.
         //Illegal move filtering happens later.
-        for(int y = 0; y<boardYSize; y++) {
-          for(int x = 0; x<boardXSize; x++) {
-            int pos = NNPos::xyToPos(x,y,nnXLen);
+        for(int pos = 0; pos < nnXLen*nnYLen; pos++) {
+          Loc loc = NNPos::posToLoc(pos,boardXSize,boardYSize,resultBuf->quaxVariantForServer,nnXLen,nnYLen);
+          if(loc != Board::NULL_LOC)
             policyProbs[pos] = (float)rand.nextGaussian();
-          }
         }
-        policyProbs[NNPos::locToPos(Board::PASS_LOC,boardXSize,nnXLen,nnYLen)] = (float)rand.nextGaussian();
+        policyProbs[nnXLen*nnYLen] = (float)rand.nextGaussian();
 
         resultBuf->result->nnXLen = nnXLen;
         resultBuf->result->nnYLen = nnYLen;
@@ -517,10 +519,9 @@ void NNEvaluator::serve(
             buf.resultBufs[row]->symmetry = defaultSymmetry;
           }
         }
-        //transpose if player is white
         if(buf.resultBufs[row]->pla == P_WHITE)
           buf.resultBufs[row]->symmetry ^= 0x4;
-        else 
+        else
           assert(buf.resultBufs[row]->pla == P_BLACK);
       }
 
@@ -601,12 +602,12 @@ void NNEvaluator::evaluate(
   buf.hasResult = false;
   buf.pla = nextPlayer;
 
-  if(board.x_size > nnXLen || board.y_size > nnYLen)
+  if(2 * board.x_size - 1 > nnXLen || board.y_size > nnYLen)
     throw StringError("NNEvaluator was configured with nnXLen = " + Global::intToString(nnXLen) +
                       " nnYLen = " + Global::intToString(nnYLen) +
                       " but was asked to evaluate board with larger x or y size");
   if(requireExactNNLen) {
-    if(board.x_size != nnXLen || board.y_size != nnYLen)
+    if(2 * board.x_size - 1 != nnXLen || board.y_size != nnYLen)
       throw StringError("NNEvaluator was configured with nnXLen = " + Global::intToString(nnXLen) +
                         " nnYLen = " + Global::intToString(nnYLen) +
                         " and requireExactNNLen, but was asked to evaluate board with different x or y size");
@@ -622,6 +623,7 @@ void NNEvaluator::evaluate(
 
   buf.boardXSizeForServer = board.x_size;
   buf.boardYSizeForServer = board.y_size;
+  buf.quaxVariantForServer = board.variant;
 
   MiscNNInputParams nnInputParamsWithResultsBeforeNN = nnInputParams;
   nnInputParamsWithResultsBeforeNN.resultsBeforeNN.init(board, history, nextPlayer);
@@ -691,9 +693,6 @@ void NNEvaluator::evaluate(
 
     float nnPolicyInvTemperature = 1.0f / nnInputParams.nnPolicyTemperature;
 
-    int xSize = board.x_size;
-    int ySize = board.y_size;
-
     float maxPolicy = -1e25f;
     bool isLegal[NNPos::MAX_NN_POLICY_SIZE];
     int legalCount = 0;
@@ -703,7 +702,7 @@ void NNEvaluator::evaluate(
     GameLogic::ResultsBeforeNN resultsBeforeNN = nnInputParamsWithResultsBeforeNN.resultsBeforeNN;
     if(resultsBeforeNN.myOnlyLoc == Board::NULL_LOC) {
       for(int i = 0; i < policySize; i++) {
-        Loc loc = NNPos::posToLoc(i, xSize, ySize, nnXLen, nnYLen);
+        Loc loc = NNPos::posToLoc(i,board,nnXLen,nnYLen);
         isLegal[i] = history.isLegal(board, loc, nextPlayer);
         isDeadOrCaptured[i] = history.rules.maxMoves == 0 && board.isDeadOrCaptured(loc);
         if(!isDeadOrCaptured[i])
@@ -715,8 +714,8 @@ void NNEvaluator::evaluate(
       for(int i = 0; i < policySize; i++) {
         isLegal[i] = false;
       }
-      isLegal[NNPos::locToPos(resultsBeforeNN.myOnlyLoc, xSize, nnXLen, nnYLen)] = true;
-      isLegal[NNPos::locToPos(Board::PASS_LOC, xSize, nnXLen, nnYLen)] = true;
+      isLegal[NNPos::locToPos(resultsBeforeNN.myOnlyLoc,board,nnXLen,nnYLen)] = true;
+      isLegal[NNPos::locToPos(Board::PASS_LOC,board,nnXLen,nnYLen)] = true;
     }
 
     if (hasNonDeadMoves)
@@ -741,22 +740,26 @@ void NNEvaluator::evaluate(
     }
 
     //policyLocalFocus
-    if(nnInputParams.policyLocalFocusPow > 0 && history.moveHistory.size() >= 1 && board.isOnBoard(history.moveHistory[history.moveHistory.size()-1].loc)) {
-      Loc lastMove = history.moveHistory[history.moveHistory.size() - 1].loc;
-      int lastMoveX = Location::getX(lastMove, board.x_size);
-      int lastMoveY = Location::getY(lastMove, board.x_size);
+    Loc lastMove = history.moveHistory.size() >= 1 ? history.moveHistory.back().loc : Board::NULL_LOC;
+    Loc lastPhysicalMove = board.getPhysicalLoc(lastMove);
+    if(nnInputParams.policyLocalFocusPow > 0 && board.isOnBoard(lastPhysicalMove)) {
+      int lastMoveX = Location::getX(lastPhysicalMove,board.x_size);
+      int lastMoveY = Location::getY(lastPhysicalMove,board.x_size);
+      double lastMoveTensorX = 2 * lastMoveX + (lastMoveY & 1);
 
       double plfDistInv = 1.0 / nnInputParams.policyLocalFocusDist;
-      for(int y = 0; y < board.y_size; y++) {
-        for(int x = 0; x < board.x_size; x++) {
-          double dx = lastMoveX - x;
-          double dy = lastMoveY - y;
-          double dist = sqrt(dx * dx + dy * dy + dx * dy);//distance on Hex board
-          double factor = -log(1 + dist * plfDistInv);
-          factor *= nnInputParams.policyLocalFocusPow;
-          int pos = NNPos::xyToPos(x, y, nnXLen);
-          policy[pos] += factor;
-        }
+      for(int pos = 0; pos < policySize; pos++) {
+        Loc moveLoc = NNPos::posToLoc(pos,board,nnXLen,nnYLen);
+        Loc physicalLoc = board.getPhysicalLoc(moveLoc);
+        if(!board.isOnBoard(physicalLoc))
+          continue;
+        int x = Location::getX(physicalLoc,board.x_size);
+        int y = Location::getY(physicalLoc,board.x_size);
+        double dx = lastMoveTensorX - (2 * x + (y & 1));
+        double dy = lastMoveY - y;
+        double dist = 0.5 * sqrt(dx * dx + dy * dy);
+        double factor = -log(1 + dist * plfDistInv);
+        policy[pos] += factor * nnInputParams.policyLocalFocusPow;
       }
     }
 

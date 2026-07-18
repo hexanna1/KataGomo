@@ -1,6 +1,5 @@
-
-                        rm -f "$BASEDIR"/latest.bin.gz
-                        cp -f "$TMPDST"/model.bin.gz "$BASEDIR"/latest.bin.gz#!/bin/bash -eu
+#!/bin/bash -eu
+set -eu
 set -o pipefail
 {
 #Takes any models in torchmodels_toexport/ and outputs a cuda-runnable model file to modelstobetested/
@@ -22,6 +21,7 @@ BASEDIR="$1"
 shift
 USEGATING="$1"
 shift
+PYTHON="${PYTHON:-python3}"
 
 #------------------------------------------------------------------------------
 
@@ -36,14 +36,18 @@ function exportStuff() {
     TODIR="$2"
 
     #Sort by timestamp so that we process in order of oldest to newest if there are multiple
-    for FILEPATH in $(find "$BASEDIR"/"$FROMDIR"/ -mindepth 1 -maxdepth 1 -printf "%T@ %p\n" | sort -n | cut -d ' ' -f 2)
+    while IFS= read -r FILEPATH
     do
+        if [ -z "$FILEPATH" ]
+        then
+            continue
+        fi
         #Make sure to skip tmp directories that are transiently there by the tensorflow training,
         #they are probably in the process of being written
-        if [ ${FILEPATH: -4} == ".tmp" ]
+        if [[ "${FILEPATH: -4}" == ".tmp" ]]
         then
             echo "Skipping tmp file:" "$FILEPATH"
-        elif [ ${FILEPATH: -9} == ".exported" ]
+        elif [[ "${FILEPATH: -9}" == ".exported" ]]
         then
             echo "Skipping self tmp file:" "$FILEPATH"
         else
@@ -66,7 +70,7 @@ function exportStuff() {
                 mkdir "$TMPDST"
 
                 set -x
-                python ./export_model_pytorch.py \
+                "$PYTHON" ./export_model_pytorch.py \
                         -checkpoint "$SRC"/model.ckpt \
                         -export-dir "$TMPDST" \
                         -model-name "$NAMEPREFIX""-""$NAME" \
@@ -103,7 +107,20 @@ function exportStuff() {
                 echo "Done exporting:" "$NAME" "to" "$TARGET"
             fi
         fi
-    done
+    done < <("$PYTHON" - "$BASEDIR"/"$FROMDIR" <<'PY'
+import os
+import sys
+
+base = sys.argv[1]
+if not os.path.isdir(base):
+    sys.exit(0)
+
+paths = [os.path.join(base, name) for name in os.listdir(base)]
+paths.sort(key=lambda path: os.path.getmtime(path))
+for path in paths:
+    print(path)
+PY
+    )
 }
 
 if [ "$USEGATING" -eq 0 ]

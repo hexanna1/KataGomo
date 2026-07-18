@@ -1,13 +1,5 @@
 #include "../game/gamelogic.h"
 
-/*
- * gamelogic.cpp
- * Logics of game rules
- * Some other game logics are in board.h/cpp
- *
- * Gomoku as a representive
- */
-
 #include <algorithm>
 #include <cassert>
 #include <cstring>
@@ -16,120 +8,64 @@
 
 using namespace std;
 
-static int8_t getColor(const int8_t* buf, int xs, int ys, int x, int y) {
-  if(x < 0 || x >= xs || y < 0 || y >= ys)
-    return 2;
-  return buf[x + y * xs];
-}
-
-static bool checkConnectionHelper(int8_t* buf, int xs, int ys, int x0, int y0, bool includeJumpConnection) {
-  // 0 empty, 1 pla, 2 opp or marked as jump gap or outside board, 3 top connection, 4 bottom connection
-  buf[x0 + y0 * xs] = 3;
-  //connect locations
-  const int dxs[7] = {0, 1, 1, 0, -1, -1, 0};
-  const int dys[7] = {-1, -1, 0, 1, 1, 0, -1};
-  for (int d = 0; d < 6; d++)
-  {
-    int x = x0 + dxs[d];
-    int y = y0 + dys[d];
-    int c = getColor(buf, xs, ys, x, y);
-    if(c == 4)
-      return true;
-    else if(c == 1) {
-      bool res = checkConnectionHelper(buf, xs, ys, x, y, includeJumpConnection);
-      if(res)
-        return true;
+bool Board::checkConnection(int8_t* buf, Player pla) const {
+  std::fill(buf,buf+x_size*y_size,0);
+  vector<Loc> stack;
+  for(int y = 0; y < y_size; y += 2) {
+    for(int x = 0; x < x_size; x++) {
+      bool source = pla == P_BLACK ? y == 0 : x == 0;
+      Loc loc = Location::getLoc(x,y,x_size);
+      if(source && colors[loc] == pla) {
+        buf[x+y*x_size] = 1;
+        stack.push_back(loc);
+      }
     }
   }
-  if(includeJumpConnection) {
-    // jump locations
-    const int dxs2[6] = {1, 2, 1, -1, -2, -1};
-    const int dys2[6] = {-2, -1, 1, 2, 1, -1};
-    for(int d = 0; d < 6; d++) {
-      int x = x0 + dxs2[d];
-      int y = y0 + dys2[d];
-      int c = getColor(buf, xs, ys, x, y);
-      if(c == 4) {
-        if(
-          getColor(buf, xs, ys, x0 + dxs[d], y0 + dys[d]) == 0 &&
-          getColor(buf, xs, ys, x0 + dxs[d + 1], y0 + dys[d + 1]) == 0)
-          return true;
-      } else if(c == 1) {
-        if(
-          getColor(buf, xs, ys, x0 + dxs[d], y0 + dys[d]) == 0 &&
-          getColor(buf, xs, ys, x0 + dxs[d + 1], y0 + dys[d + 1]) == 0) {
-          buf[x0 + dxs[d] + xs * (y0 + dys[d])] = 2;
-          buf[x0 + dxs[d + 1] + xs * (y0 + dys[d + 1])] = 2;
-          bool res = checkConnectionHelper(buf, xs, ys, x, y, includeJumpConnection);
-          if(res)
-            return true;
-        }
+
+  while(!stack.empty()) {
+    Loc loc = stack.back();
+    stack.pop_back();
+    int x = Location::getX(loc,x_size);
+    int y = Location::getY(loc,x_size);
+    if((pla == P_BLACK && y == y_size-1) || (pla == P_WHITE && x == x_size-1))
+      return true;
+
+    const int orthDx[4] = {-1,1,0,0};
+    const int orthDy[4] = {0,0,-2,2};
+    for(int i = 0; i < 4; i++) {
+      int nx = x + orthDx[i];
+      int ny = y + orthDy[i];
+      if(nx < 0 || nx >= x_size || ny < 0 || ny >= y_size)
+        continue;
+      Loc next = Location::getLoc(nx,ny,x_size);
+      if(colors[next] == pla && buf[nx+ny*x_size] == 0) {
+        buf[nx+ny*x_size] = 1;
+        stack.push_back(next);
+      }
+    }
+
+    const int diagDx[4] = {-1,1,-1,1};
+    const int diagDy[4] = {-2,-2,2,2};
+    for(int i = 0; i < 4; i++) {
+      int nx = x + diagDx[i];
+      int ny = y + diagDy[i];
+      if(nx < 0 || nx >= x_size || ny < 0 || ny >= y_size)
+        continue;
+      int diamondX = std::min(x,nx);
+      int diamondY = (y+ny)/2;
+      Loc diamond = Location::getLoc(diamondX,diamondY,x_size);
+      Loc next = Location::getLoc(nx,ny,x_size);
+      CrosscutDirection direction = crosscutDirections[diamond];
+      bool directionMatches = direction == CROSSCUT_BOTH ||
+        (direction == CROSSCUT_BACKSLASH && (nx-x)*(ny-y) > 0) ||
+        (direction == CROSSCUT_SLASH && (nx-x)*(ny-y) < 0);
+      if(colors[diamond] == pla && directionMatches && colors[next] == pla && buf[nx+ny*x_size] == 0) {
+        buf[nx+ny*x_size] = 1;
+        stack.push_back(next);
       }
     }
   }
   return false;
-
-}
-bool Board::checkConnection(int8_t* buf, Player pla, bool includeJumpConnection) const {
-  int xs = x_size, ys = y_size;
-  Player opp = getOpp(pla);
-  // firstly, copy the board
-  //0 empty, 1 pla, 2 opp or marked as jump gap, 3 top connection, 4 bottom connection
-  //always connect at y axis. if white, transpose
-  
-  if(pla == C_BLACK) {
-    for(int y = 0; y < ys; y++)
-      for(int x = 0; x < xs; x++) {
-        Loc loc = Location::getLoc(x, y, xs);
-        Color c = colors[loc];
-        buf[x + y * xs] = c == pla ? 1 : c == opp ? 2 : 0;
-      }
-  }
-  else {
-    std::swap(xs, ys);
-    for(int y = 0; y < ys; y++)
-      for(int x = 0; x < xs; x++) {
-        Loc loc = Location::getLoc(y, x, ys);
-        Color c = colors[loc];
-        buf[x + y * xs] = c == pla ? 1 : c == opp ? 2 : 0;
-      }
-  }
-  assert(ys >= 4);
-  //mark top connection and bottom connection
-  // bottom 1st row
-  for(int x = 0; x < xs; x++) {
-    if(buf[(ys - 1) * xs + x] == 1)
-      buf[(ys - 1) * xs + x] = 4;
-  }
-  if(includeJumpConnection) {
-    // bottom 2nd row, considering jump connection
-    for(int x = 1; x < xs; x++) {
-      if(buf[(ys - 2) * xs + x] == 1 && buf[(ys - 1) * xs + x] == 0 && buf[(ys - 1) * xs + x - 1] == 0)
-        buf[(ys - 2) * xs + x] = 4;
-    }
-  }
-
-  //search from top
-  bool connected = false;
-  // top 1st row
-  for(int x = 0; x < xs; x++) {
-    if(connected)
-      break;
-    if(buf[0 * xs + x] == 1)
-      connected |= checkConnectionHelper(buf, xs, ys, x, 0, includeJumpConnection);
-  }
-  if(includeJumpConnection) {
-    // top 2nd row, considering jump connection
-    for(int x = 0; x < xs - 1; x++) {
-      if(connected)
-        break;
-      if(buf[1 * xs + x] == 1 && buf[0 * xs + x] == 0 && buf[0 * xs + x + 1] == 0)
-        connected |= checkConnectionHelper(buf, xs, ys, x, 1, includeJumpConnection);
-    }
-  }
-
-
-  return connected;
 }
 
 void Board::initCaptureTable() {
@@ -251,57 +187,10 @@ void Board::initCaptureTable() {
 }
 
 bool Board::isDeadOrCaptured(Loc loc) const {
-  assert(IS_CAPTURETABLE_INITALIZED);
-  if(!isOnBoard(loc))
+  if(loc == PASS_LOC)
     return true;
-  if(colors[loc] != C_EMPTY)
-    return true;
-  // connect locations
-  const int dxs[6] = {0, 1, 1, 0, -1, -1};
-  const int dys[6] = {-1, -1, 0, 1, 1, 0};
-
-  int x0 = Location::getX(loc, x_size);
-  int y0 = Location::getY(loc, x_size);
-
-  int surroundings = 0;
-  for (int d = 0; d < 6; d++) {
-    int x = x0 + dxs[d];
-    int y = y0 + dys[d];
-    Color c = C_WALL;
-    if(x >= 0 && x < x_size && y >= 0 && y < y_size)
-      c = colors[Location::getLoc(x, y, x_size)];
-    else if(x == -1) {
-      if(y >= 1 && y < y_size)
-        c = C_WHITE;
-      else
-        c = C_WALL;
-    } 
-    else if(x == x_size) {
-      if(y >= 0 && y < y_size - 1)
-        c = C_WHITE;
-      else
-        c = C_WALL;
-    }
-    else if(y == -1) {
-      if(x >= 1 && x < x_size)
-        c = C_BLACK;
-      else
-        c = C_WALL;
-    } 
-    else if(y == y_size) {
-      if(x >= 0 && x < x_size - 1)
-        c = C_BLACK;
-      else
-        c = C_WALL;
-    }
-    else ASSERT_UNREACHABLE;
-
-
-    surroundings *= 4;
-    surroundings += c;
-  }
-
-  return CAPTURE_TABLE[surroundings] != 0;
+  Loc physicalLoc = getPhysicalLoc(loc);
+  return !isOnBoard(physicalLoc) || colors[physicalLoc] != C_EMPTY;
 
 }
 
@@ -311,12 +200,14 @@ Color GameLogic::checkWinnerAfterPlayed(
   Player pla,
   Loc loc,
   int8_t* bufferForCheckingWinner) {
-  bool includeJumpConnection = hist.rules.maxMoves == 0;
-  if(board.checkConnection(bufferForCheckingWinner, pla, includeJumpConnection))
+  if(board.checkConnection(bufferForCheckingWinner, pla))
     return pla;
 
   if(loc == Board::PASS_LOC)
     return getOpp(pla);  //pass is not allowed
+
+  if(QuaxVariantIO::hasDirectionalCrosscuts(board.variant) && board.numStonesOnBoard() >= board.playableArea())
+    return C_EMPTY;
 
   //check maxmoves
   if (hist.rules.maxMoves > 0)
@@ -337,7 +228,9 @@ GameLogic::ResultsBeforeNN::ResultsBeforeNN() {
 }
 
 void GameLogic::ResultsBeforeNN::init(const Board& board, const BoardHistory& hist, Color nextPlayer) {
-  //not used in Hex
+  (void)board;
+  (void)hist;
+  (void)nextPlayer;
   if(inited)
     return;
   inited = true;

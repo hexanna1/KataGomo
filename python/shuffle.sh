@@ -1,4 +1,5 @@
 #!/bin/bash -eu
+set -eu
 set -o pipefail
 {
 #Shuffles and copies selfplay training from selfplay/ to shuffleddata/current/
@@ -22,6 +23,7 @@ NTHREADS="$1"
 shift
 BATCHSIZE="$1"
 shift
+PYTHON="${PYTHON:-python3}"
 
 #------------------------------------------------------------------------------
 
@@ -37,7 +39,7 @@ echo "Beginning shuffle at" $(date "+%Y-%m-%d %H:%M:%S")
 
 #set -x
 (
-    time python ./shuffle.py \
+    time "$PYTHON" ./shuffle.py \
          "$BASEDIR"/selfplay/ \
          -expand-window-per-row 0.4 \
          -taper-window-exponent 0.65 \
@@ -52,12 +54,10 @@ echo "Beginning shuffle at" $(date "+%Y-%m-%d %H:%M:%S")
          -only-include-md5-path-prop-ubound 0.95 \
          -output-npz \
          "$@" \
-         2>&1 | tee "$BASEDIR"/shuffleddata/$OUTDIR/outtrain.txt &
-
-    wait
+         2>&1 | tee "$BASEDIR"/shuffleddata/$OUTDIR/outtrain.txt
 )
 (
-    time python ./shuffle.py \
+    time "$PYTHON" ./shuffle.py \
          "$BASEDIR"/selfplay/ \
          -expand-window-per-row 0.4 \
          -taper-window-exponent 0.65 \
@@ -72,9 +72,7 @@ echo "Beginning shuffle at" $(date "+%Y-%m-%d %H:%M:%S")
          -only-include-md5-path-prop-ubound 1.00 \
          -output-npz \
          "$@" \
-         2>&1 | tee "$BASEDIR"/shuffleddata/$OUTDIR/outval.txt &
-
-    wait
+         2>&1 | tee "$BASEDIR"/shuffleddata/$OUTDIR/outval.txt
 )
 
 #set +x
@@ -85,9 +83,9 @@ sleep 10
 #rm if it already exists
 
 rm -rf "$BASEDIR"/shuffleddata/current_tmp
-ln -s $OUTDIR "$BASEDIR"/shuffleddata/current_tmp
-rm -rf $BASEDIR/shuffleddata/current
-mv -Tf "$BASEDIR"/shuffleddata/current_tmp "$BASEDIR"/shuffleddata/current
+ln -s "$OUTDIR" "$BASEDIR"/shuffleddata/current_tmp
+rm -rf "$BASEDIR"/shuffleddata/current
+mv "$BASEDIR"/shuffleddata/current_tmp "$BASEDIR"/shuffleddata/current
 
 
 
@@ -97,7 +95,30 @@ mv -Tf "$BASEDIR"/shuffleddata/current_tmp "$BASEDIR"/shuffleddata/current
 #This should be VERY conservative and allow plenty of time for the training to switch
 #to newer ones as they get generated.
 echo "Cleaning up any old dirs"
-find "$BASEDIR"/shuffleddata/ -mindepth 1 -maxdepth 1 -type d -mmin +120 | sort | head -n -5 | xargs --no-run-if-empty rm -r
+"$PYTHON" - "$BASEDIR"/shuffleddata <<'PY'
+import os
+import shutil
+import sys
+import time
+
+base = sys.argv[1]
+cutoff = time.time() - 120 * 60
+old_dirs = []
+for name in os.listdir(base):
+    path = os.path.join(base, name)
+    if os.path.islink(path) or not os.path.isdir(path):
+        continue
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        continue
+    if mtime < cutoff:
+        old_dirs.append((name, path))
+
+old_dirs.sort()
+for _, path in old_dirs[:-5]:
+    shutil.rmtree(path)
+PY
 
 echo "Finished shuffle at" $(date "+%Y-%m-%d %H:%M:%S")
 #Make a little space between shuffles

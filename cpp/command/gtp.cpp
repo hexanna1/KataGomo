@@ -26,10 +26,7 @@ static const vector<string> knownCommands = {
   "list_commands",
   "quit",
 
-  //GTP extension - specify "boardsize X:Y" or "boardsize X Y" for non-square sizes
-  //rectangular_boardsize is an alias for boardsize, intended to make it more evident that we have such support
   "boardsize",
-  "rectangular_boardsize",
 
   "clear_board",
   "set_position",
@@ -68,9 +65,6 @@ static const vector<string> knownCommands = {
   "kata-time_settings",
 
   "final_status_list",
-
-  "loadsgf",
-  "printsgf",
 
   //GTP extensions for board analysis
   // "genmove_analyze",
@@ -204,6 +198,7 @@ struct GTPEngine {
   NNEvaluator* nnEval;
   AsyncBot* bot;
   Rules currentRules; //Should always be the same as the rules in bot, if bot is not NULL.
+  QuaxVariant quaxVariant;
 
   //Stores the params we want to be using during genmoves or analysis
   SearchParams params;
@@ -227,6 +222,7 @@ struct GTPEngine {
 
   GTPEngine(
     const string& modelFile, SearchParams initialParams, Rules initialRules,
+    QuaxVariant initialQuaxVariant,
     double staticPDA,
     double normAvoidRepeatedPatternUtility,
     double genmoveWRN, double analysisWRN,
@@ -242,6 +238,7 @@ struct GTPEngine {
      nnEval(NULL),
      bot(NULL),
      currentRules(initialRules),
+     quaxVariant(initialQuaxVariant),
      params(initialParams),
      bTimeControls(),
      wTimeControls(),
@@ -276,7 +273,7 @@ struct GTPEngine {
 
   //Specify -1 for the sizes for a default
   void setOrResetBoardSize(ConfigParser& cfg, Logger& logger, Rand& seedRand, int boardXSize, int boardYSize, bool loggingToStderr) {
-    if(nnEval != NULL && boardXSize == nnEval->getNNXLen() && boardYSize == nnEval->getNNYLen())
+    if(nnEval != NULL && 2 * boardXSize - 1 == nnEval->getNNXLen() && boardYSize == nnEval->getNNYLen())
       return;
     if(nnEval != NULL) {
       assert(bot != NULL);
@@ -291,7 +288,7 @@ struct GTPEngine {
     bool wasDefault = false;
     if(boardXSize == -1 || boardYSize == -1) {
       boardXSize = Board::DEFAULT_LEN;
-      boardYSize = Board::DEFAULT_LEN;
+      boardYSize = Board::internalYSizeForUserSize(Board::DEFAULT_LEN);
       wasDefault = true;
     }
 
@@ -327,7 +324,7 @@ struct GTPEngine {
     //On default setup, also override board size to whatever the neural net was initialized with
     //So that if the net was initalized smaller, we don't fail with a big board
     if(wasDefault) {
-      boardXSize = nnEval->getNNXLen();
+      boardXSize = (nnEval->getNNXLen() + 1) / 2;
       boardYSize = nnEval->getNNYLen();
     }
     logger.write("Initializing board with boardXSize " + Global::intToString(boardXSize) + " boardYSize " + Global::intToString(boardYSize));
@@ -343,7 +340,7 @@ struct GTPEngine {
     bot = new AsyncBot(params, nnEval, &logger, searchRandSeed);
     bot->setCopyOfExternalPatternBonusTable(patternBonusTable);
 
-    Board board(boardXSize,boardYSize);
+    Board board(boardXSize,boardYSize,quaxVariant);
     Player pla = P_BLACK;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
@@ -366,7 +363,7 @@ struct GTPEngine {
     assert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
+    Board board(newXSize,newYSize,quaxVariant);
     Player pla = P_BLACK;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
@@ -378,14 +375,14 @@ struct GTPEngine {
     assert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
+    Board board(newXSize,newYSize,quaxVariant);
     bool suc = board.setStones(initialStones);
     if(!suc)
       return false;
 
     //Sanity check
     for(int i = 0; i<initialStones.size(); i++) {
-      if(board.colors[initialStones[i].loc] != initialStones[i].pla) {
+      if(board.colors[board.getPhysicalLoc(initialStones[i].loc)] != initialStones[i].pla) {
         assert(false);
         return false;
       }
@@ -897,7 +894,7 @@ struct GTPEngine {
           nnEval->evaluate(prevBoard,prevHist,prevPla,nnInputParams,buf,skipCache);
 
           NNOutput* nnOutput = buf.result.get();
-          int pos = NNPos::locToPos(prevLoc,board.x_size,nnOutput->nnXLen,nnOutput->nnYLen);
+          int pos = NNPos::locToPos(prevLoc,board,nnOutput->nnXLen,nnOutput->nnYLen);
           policyStr += Global::strprintf("%.2f%% ", 100.0 * (nnOutput->policyProbs[pos]));
         }
       }
@@ -934,10 +931,10 @@ struct GTPEngine {
         out << "shorttermWinlossError " << Global::strprintf("%.3f",nnOutput->shorttermWinlossError) << endl;
 
         out << "policy" << endl;
-        for(int y = 0; y<board.y_size; y++) {
-          for(int x = 0; x<board.x_size; x++) {
-            int pos = NNPos::xyToPos(x,y,nnOutput->nnXLen);
-            float prob = nnOutput->policyProbs[pos];
+        int tensorBoardLen = 2 * board.x_size - 1;
+        for(int y = 0; y < tensorBoardLen; y++) {
+          for(int x = 0; x < tensorBoardLen; x++) {
+            float prob = nnOutput->policyProbs[NNPos::xyToPos(x,y,nnOutput->nnXLen)];
             if(prob < 0)
               out << "    NAN ";
             else
@@ -947,7 +944,7 @@ struct GTPEngine {
         }
         out << "policyPass ";
         {
-          int pos = NNPos::locToPos(Board::PASS_LOC,board.x_size,nnOutput->nnXLen,nnOutput->nnYLen);
+          int pos = NNPos::locToPos(Board::PASS_LOC,board,nnOutput->nnXLen,nnOutput->nnYLen);
           float prob = nnOutput->policyProbs[pos];
           if(prob < 0)
             out << "    NAN "; // Probably shouldn't ever happen for pass unles the rules change, but we handle it anyways
@@ -1185,6 +1182,8 @@ int MainCmds::gtp(const vector<string>& args) {
   if(startupPrintMessageToStderr && !logger.isLoggingToStderr()) {
     cerr << "Using " + initialRules.toStringMaybeNice() + " rules initially, unless GTP/GUI overrides this" << endl;
   }
+  QuaxVariant quaxVariant = cfg.contains("quaxVariant") ? QuaxVariantIO::parse(cfg.getString("quaxVariant")) : QuaxVariant::DoubleCrosscut;
+  logger.write("Using Quax variant " + QuaxVariantIO::toString(quaxVariant));
 
   SearchParams initialParams = Setup::loadSingleParams(cfg,Setup::SETUP_FOR_GTP);
   logger.write("Using " + Global::intToString(initialParams.numThreads) + " CPU thread(s) for search");
@@ -1230,7 +1229,7 @@ int MainCmds::gtp(const vector<string>& args) {
   Player perspective = Setup::parseReportAnalysisWinrates(cfg,C_EMPTY);
 
   GTPEngine* engine = new GTPEngine(
-    nnModelFile,initialParams,initialRules,
+    nnModelFile,initialParams,initialRules,quaxVariant,
     staticPlayoutDoublingAdvantage,
     normalAvoidRepeatedPatternUtility, 
     genmoveWideRootNoise,analysisWideRootNoise,
@@ -1367,40 +1366,27 @@ int MainCmds::gtp(const vector<string>& args) {
       logger.write("Quit requested by controller");
     }
 
-    else if(command == "boardsize" || command == "rectangular_boardsize") {
+    else if(command == "boardsize") {
       int newXSize = 0;
       int newYSize = 0;
       bool suc = false;
 
-      if(pieces.size() == 1) {
-        if(contains(pieces[0],':')) {
-          vector<string> subpieces = Global::split(pieces[0],':');
-          if(subpieces.size() == 2 && Global::tryStringToInt(subpieces[0], newXSize) && Global::tryStringToInt(subpieces[1], newYSize))
-            suc = true;
-        }
-        else {
-          if(Global::tryStringToInt(pieces[0], newXSize)) {
-            suc = true;
-            newYSize = newXSize;
-          }
-        }
-      }
-      else if(pieces.size() == 2) {
-        if(Global::tryStringToInt(pieces[0], newXSize) && Global::tryStringToInt(pieces[1], newYSize))
-          suc = true;
+      if(pieces.size() == 1 && Global::tryStringToInt(pieces[0], newXSize)) {
+        suc = true;
+        newYSize = Board::internalYSizeForUserSize(newXSize);
       }
 
       if(!suc) {
         responseIsError = true;
-        response = "Expected int argument for boardsize or pair of ints but got '" + Global::concat(pieces," ") + "'";
+        response = "Expected one integer argument for boardsize but got '" + Global::concat(pieces," ") + "'";
       }
       else if(newXSize < 2 || newYSize < 2) {
         responseIsError = true;
         response = "unacceptable size";
       }
-      else if(newXSize > Board::MAX_LEN || newYSize > Board::MAX_LEN) {
+      else if(newXSize > Board::MAX_USER_SIZE || newYSize > Board::MAX_LEN) {
         responseIsError = true;
-        response = Global::strprintf("unacceptable size (Board::MAX_LEN is %d, consider increasing and recompiling)",(int)Board::MAX_LEN);
+        response = Global::strprintf("unacceptable size (maximum Quax size is %d)",(int)Board::MAX_USER_SIZE);
       }
       else {
         engine->setOrResetBoardSize(cfg,logger,seedRand,newXSize,newYSize,logger.isLoggingToStderr());
@@ -2061,141 +2047,6 @@ int MainCmds::gtp(const vector<string>& args) {
     }
 
 
-    else if(command == "loadsgf") {
-      if(pieces.size() != 1 && pieces.size() != 2) {
-        responseIsError = true;
-        response = "Expected one or two arguments for loadsgf but got '" + Global::concat(pieces," ") + "'";
-      }
-      else {
-        string filename = pieces[0];
-        bool parseFailed = false;
-        bool moveNumberSpecified = false;
-        int moveNumber = 0;
-        if(pieces.size() == 2) {
-          bool suc = Global::tryStringToInt(pieces[1],moveNumber);
-          moveNumber--;
-          if(!suc || moveNumber < 0 || moveNumber > 10000000)
-            parseFailed = true;
-          else {
-            moveNumberSpecified = true;
-          }
-        }
-        if(parseFailed) {
-          responseIsError = true;
-          response = "Invalid value for moveNumber for loadsgf";
-        }
-        else {
-          Board sgfInitialBoard;
-          Player sgfInitialNextPla;
-          BoardHistory sgfInitialHist;
-          Rules sgfRules;
-          Board sgfBoard;
-          Player sgfNextPla;
-          BoardHistory sgfHist;
-
-          bool sgfParseSuccess = false;
-          CompactSgf* sgf = NULL;
-          try {
-            sgf = CompactSgf::loadFile(filename);
-
-            if(sgf->moves.size() > 0x3FFFFFFF)
-              throw StringError("Sgf has too many moves");
-            if(!moveNumberSpecified || moveNumber > sgf->moves.size())
-              moveNumber = (int)sgf->moves.size();
-
-            sgfRules = sgf->getRulesOrWarn(
-              engine->getCurrentRules(), //Use current rules as default
-              [&logger](const string& msg) { logger.write(msg); cerr << msg << endl; }
-            );
-            if(engine->nnEval != NULL) {
-              bool rulesWereSupported;
-              Rules supportedRules = engine->nnEval->getSupportedRules(sgfRules,rulesWereSupported);
-              if(!rulesWereSupported) {
-                ostringstream out;
-                out << "WARNING: Rules " << sgfRules.toJsonString()
-                    << " from sgf not supported by neural net, using " << supportedRules.toJsonString() << " instead";
-                logger.write(out.str());
-                if(!logger.isLoggingToStderr())
-                  cerr << out.str() << endl;
-                sgfRules = supportedRules;
-              }
-            }
-
-
-            {
-              //See if the rules differ, IGNORING komi differences
-              Rules currentRules = engine->getCurrentRules();
-              if(sgfRules != currentRules) {
-                ostringstream out;
-                out << "Changing rules to " << sgfRules.toJsonString();
-                logger.write(out.str());
-                if(!logger.isLoggingToStderr())
-                  cerr << out.str() << endl;
-              }
-            }
-
-            sgf->setupInitialBoardAndHist(sgfRules, sgfInitialBoard, sgfInitialNextPla, sgfInitialHist);
-            sgfInitialHist.setInitialTurnNumber(sgfInitialBoard.numStonesOnBoard()); //Should give more accurate temperaure and time control behavior
-            sgfBoard = sgfInitialBoard;
-            sgfNextPla = sgfInitialNextPla;
-            sgfHist = sgfInitialHist;
-            sgf->playMovesTolerant(sgfBoard,sgfNextPla,sgfHist,moveNumber);
-
-            delete sgf;
-            sgf = NULL;
-            sgfParseSuccess = true;
-          }
-          catch(const StringError& err) {
-            delete sgf;
-            sgf = NULL;
-            responseIsError = true;
-            response = "Could not load sgf: " + string(err.what());
-          }
-          catch(...) {
-            delete sgf;
-            sgf = NULL;
-            responseIsError = true;
-            response = "Cannot load file";
-          }
-
-          if(sgfParseSuccess) {
-            engine->setOrResetBoardSize(cfg,logger,seedRand,sgfBoard.x_size,sgfBoard.y_size,logger.isLoggingToStderr());
-            engine->setPositionAndRules(sgfNextPla, sgfBoard, sgfHist, sgfInitialBoard, sgfInitialNextPla, sgfHist.moveHistory);
-          }
-        }
-      }
-    }
-
-    else if(command == "printsgf") {
-      if(pieces.size() != 0 && pieces.size() != 1) {
-        responseIsError = true;
-        response = "Expected zero or one argument for print but got '" + Global::concat(pieces," ") + "'";
-      }
-      else {
-        auto writeSgfToStream = [&](ostream& out) {
-          WriteSgf::writeSgf(out,"","",engine->bot->getRootHist(),NULL,true,false);
-        };
-
-        if(pieces.size() == 0 || pieces[0] == "-") {
-          ostringstream out;
-          writeSgfToStream(out);
-          response = out.str();
-        }
-        else {
-          ofstream out;
-          if(FileUtils::tryOpen(out,pieces[0])) {
-            writeSgfToStream(out);
-            out.close();
-            response = "";
-          }
-          else {
-            responseIsError = true;
-            response = "Could not open or write to file: " + pieces[0];
-          }
-        }
-      }
-    }
-
     else if(command == "analyze" || command == "lz-analyze" || command == "kata-analyze") {
       Player pla = engine->bot->getRootPla();
       bool parseFailed = false;
@@ -2233,7 +2084,7 @@ int MainCmds::gtp(const vector<string>& args) {
 
       if(!parsed) {
         responseIsError = true;
-        response = "Expected one argument 'all' or symmetry index [0-7] for kata-raw-nn but got '" + Global::concat(pieces," ") + "'";
+        response = "Expected one argument 'all' or symmetry index [0-3] for kata-raw-nn but got '" + Global::concat(pieces," ") + "'";
       }
       else {
         response = engine->rawNN(whichSymmetry);

@@ -25,11 +25,50 @@ Hash128 Board::ZOBRIST_PLAYER_HASH[4];
 Hash128 Board::ZOBRIST_MOVENUM_HASH[MAX_ARR_SIZE];
 Hash128 Board::ZOBRIST_LASTMOVE_HASH[MAX_ARR_SIZE];
 Hash128 Board::ZOBRIST_BOARD_HASH2[MAX_ARR_SIZE][4];
+Hash128 Board::ZOBRIST_CROSSCUT_DIRECTION_HASH[MAX_ARR_SIZE][4];
+Hash128 Board::ZOBRIST_VARIANT_HASH[3];
 const Hash128 Board::ZOBRIST_GAME_IS_OVER = //Based on sha256 hash of Board::ZOBRIST_GAME_IS_OVER
   Hash128(0xb6f9e465597a77eeULL, 0xf1d583d960a4ce7fULL);
 
 bool Board::IS_CAPTURETABLE_INITALIZED = false;
 int8_t Board::CAPTURE_TABLE[4096];
+
+string QuaxVariantIO::toString(QuaxVariant variant) {
+  switch(variant) {
+  case QuaxVariant::DoubleCrosscut: return "double";
+  case QuaxVariant::SingleCrosscut: return "single";
+  case QuaxVariant::Official: return "official";
+  default: ASSERT_UNREACHABLE;
+  }
+}
+
+bool QuaxVariantIO::tryParse(const string& s, QuaxVariant& variant) {
+  string lower = Global::toLower(Global::trim(s));
+  if(lower == "double") {
+    variant = QuaxVariant::DoubleCrosscut;
+    return true;
+  }
+  if(lower == "single") {
+    variant = QuaxVariant::SingleCrosscut;
+    return true;
+  }
+  if(lower == "official") {
+    variant = QuaxVariant::Official;
+    return true;
+  }
+  return false;
+}
+
+QuaxVariant QuaxVariantIO::parse(const string& s) {
+  QuaxVariant variant;
+  if(!tryParse(s,variant))
+    throw StringError("Unknown Quax variant: " + s);
+  return variant;
+}
+
+bool QuaxVariantIO::hasDirectionalCrosscuts(QuaxVariant variant) {
+  return variant == QuaxVariant::SingleCrosscut || variant == QuaxVariant::Official;
+}
 //LOCATION--------------------------------------------------------------------------------
 Loc Location::getLoc(int x, int y, int x_size)
 {
@@ -73,12 +112,17 @@ bool Location::isAdjacent(Loc loc0, Loc loc1, int x_size)
 
 Board::Board()
 {
-  init(DEFAULT_LEN,DEFAULT_LEN);
+  init(DEFAULT_LEN,internalYSizeForUserSize(DEFAULT_LEN),QuaxVariant::DoubleCrosscut);
 }
 
 Board::Board(int x, int y)
 {
-  init(x,y);
+  init(x,y,QuaxVariant::DoubleCrosscut);
+}
+
+Board::Board(int x, int y, QuaxVariant v)
+{
+  init(x,y,v);
 }
 
 
@@ -86,8 +130,10 @@ Board::Board(const Board& other)
 {
   x_size = other.x_size;
   y_size = other.y_size;
+  variant = other.variant;
 
   memcpy(colors, other.colors, sizeof(Color)*MAX_ARR_SIZE);
+  memcpy(crosscutDirections, other.crosscutDirections, sizeof(CrosscutDirection)*MAX_ARR_SIZE);
 
   movenum = other.movenum;
   stonenum = other.stonenum;
@@ -96,17 +142,20 @@ Board::Board(const Board& other)
   memcpy(adj_offsets, other.adj_offsets, sizeof(short)*8);
 }
 
-void Board::init(int xS, int yS)
+void Board::init(int xS, int yS, QuaxVariant v)
 {
   assert(IS_ZOBRIST_INITALIZED);
-  if(xS < 0 || yS < 0 || xS > MAX_LEN || yS > MAX_LEN)
-    throw StringError("Board::init - invalid board size");
+  if(xS < 0 || yS < 0 || xS > MAX_LEN || yS > MAX_LEN || !isValidQuaxDimensions(xS,yS))
+    throw StringError("Board::init - invalid Quax board dimensions");
 
   x_size = xS;
   y_size = yS;
+  variant = v;
 
-  for(int i = 0; i < MAX_ARR_SIZE; i++)
+  for(int i = 0; i < MAX_ARR_SIZE; i++) {
     colors[i] = C_WALL;
+    crosscutDirections[i] = CROSSCUT_NONE;
+  }
 
   movenum = 0;
   stonenum = 0;
@@ -116,12 +165,13 @@ void Board::init(int xS, int yS)
     for(int x = 0; x < x_size; x++)
     {
       Loc loc = (x+1) + (y+1)*(x_size+1);
-      colors[loc] = C_EMPTY;
+      if(y % 2 == 0 || x < x_size-1)
+        colors[loc] = C_EMPTY;
       // empty_list.add(loc);
     }
   }
 
-  pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size];
+  pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size] ^ ZOBRIST_VARIANT_HASH[(int)variant];
 
   Location::getAdjacentOffsets(adj_offsets,x_size);
 }
@@ -144,6 +194,9 @@ void Board::initHash()
   for(int i = 0; i<4; i++)
     ZOBRIST_PLAYER_HASH[i] = nextHash();
 
+  for(int i = 0; i<3; i++)
+    ZOBRIST_VARIANT_HASH[i] = nextHash();
+
   //Do this second so that the player and encore hashes are not
   //afffected by the size of the board we compile with.
   for(int i = 0; i<MAX_ARR_SIZE; i++) {
@@ -154,6 +207,12 @@ void Board::initHash()
         ZOBRIST_BOARD_HASH[i][j] = nextHash();
 
     }
+  }
+
+  for(int i = 0; i<MAX_ARR_SIZE; i++) {
+    ZOBRIST_CROSSCUT_DIRECTION_HASH[i][CROSSCUT_NONE] = Hash128();
+    for(int direction = CROSSCUT_BOTH; direction <= CROSSCUT_SLASH; direction++)
+      ZOBRIST_CROSSCUT_DIRECTION_HASH[i][direction] = nextHash();
   }
 
   for(int i = 0; i < MAX_ARR_SIZE; i++) {
@@ -188,11 +247,71 @@ bool Board::isOnBoard(Loc loc) const {
   return loc >= 0 && loc < MAX_ARR_SIZE && colors[loc] != C_WALL;
 }
 
+bool Board::isDiamond(Loc loc) const {
+  return isOnBoard(loc) && Location::getY(loc,x_size) % 2 == 1;
+}
+
+bool Board::isSecondCrosscutLoc(Loc loc) const {
+  if(!QuaxVariantIO::hasDirectionalCrosscuts(variant) || loc < SECOND_CROSSCUT_LOC_BASE || loc >= MAX_ARR_SIZE)
+    return false;
+  int index = loc-SECOND_CROSSCUT_LOC_BASE;
+  return index < (x_size-1)*(x_size-1);
+}
+
+Loc Board::getPhysicalLoc(Loc loc) const {
+  if(!isSecondCrosscutLoc(loc))
+    return loc;
+  int index = loc-SECOND_CROSSCUT_LOC_BASE;
+  int x = index % (x_size-1);
+  int row = index / (x_size-1);
+  return Location::getLoc(x,2*row+1,x_size);
+}
+
+Loc Board::getSecondCrosscutLoc(Loc diamondLoc) const {
+  assert(QuaxVariantIO::hasDirectionalCrosscuts(variant) && isDiamond(diamondLoc));
+  int x = Location::getX(diamondLoc,x_size);
+  int row = Location::getY(diamondLoc,x_size)/2;
+  return SECOND_CROSSCUT_LOC_BASE + row*(x_size-1)+x;
+}
+
+CrosscutDirection Board::getCrosscutDirectionForMove(Loc loc) const {
+  if(isSecondCrosscutLoc(loc))
+    return CROSSCUT_SLASH;
+  if(isDiamond(loc))
+    return variant == QuaxVariant::DoubleCrosscut ? CROSSCUT_BOTH : CROSSCUT_BACKSLASH;
+  return CROSSCUT_NONE;
+}
+
+int Board::playableArea() const {
+  return x_size*x_size + (x_size-1)*(x_size-1);
+}
+
+bool Board::isValidQuaxDimensions(int xSize, int ySize) {
+  return xSize >= 2 && ySize == internalYSizeForUserSize(xSize) && ySize <= MAX_LEN;
+}
+
+int Board::internalYSizeForUserSize(int size) {
+  return 2 * size - 1;
+}
+
 //Check if moving here is illegal.
 bool Board::isLegal(Loc loc, Player pla) const
 {
   if(pla != P_BLACK && pla != P_WHITE)
     return false;
+  bool secondCrosscut = isSecondCrosscutLoc(loc);
+  Loc physicalLoc = secondCrosscut ? getPhysicalLoc(loc) : loc;
+  if(variant == QuaxVariant::Official && isDiamond(physicalLoc)) {
+    if(colors[physicalLoc] != C_EMPTY)
+      return false;
+    int x = Location::getX(physicalLoc,x_size);
+    int row = Location::getY(physicalLoc,x_size)/2;
+    Loc first = Location::getLoc(secondCrosscut ? x+1 : x,2*row,x_size);
+    Loc second = Location::getLoc(secondCrosscut ? x : x+1,2*(row+1),x_size);
+    return colors[first] == pla && colors[second] == pla;
+  }
+  if(secondCrosscut)
+    return colors[physicalLoc] == C_EMPTY;
   return loc == PASS_LOC || (
     loc >= 0 &&
     loc < MAX_ARR_SIZE &&
@@ -204,7 +323,7 @@ bool Board::isEmpty() const {
   for(int y = 0; y < y_size; y++) {
     for(int x = 0; x < x_size; x++) {
       Loc loc = Location::getLoc(x,y,x_size);
-      if(colors[loc] != C_EMPTY)
+      if(isOnBoard(loc) && colors[loc] != C_EMPTY)
         return false;
     }
   }
@@ -238,15 +357,26 @@ int Board::numPlaStonesOnBoard(Player pla) const {
 
 bool Board::setStone(Loc loc, Color color)
 {
-  if(loc < 0 || loc >= MAX_ARR_SIZE || colors[loc] == C_WALL)
+  bool secondCrosscut = isSecondCrosscutLoc(loc);
+  Loc physicalLoc = secondCrosscut ? getPhysicalLoc(loc) : loc;
+  if(physicalLoc < 0 || physicalLoc >= MAX_ARR_SIZE || colors[physicalLoc] == C_WALL)
+    return false;
+  if(secondCrosscut && !isDiamond(physicalLoc))
     return false;
   if(color != C_BLACK && color != C_WHITE && color != C_EMPTY)
     return false;
 
-  Color colorOld = colors[loc];
-  colors[loc] = color;
-  pos_hash ^= ZOBRIST_BOARD_HASH[loc][colorOld];
-  pos_hash ^= ZOBRIST_BOARD_HASH[loc][color];
+  Color colorOld = colors[physicalLoc];
+  CrosscutDirection directionOld = crosscutDirections[physicalLoc];
+  CrosscutDirection direction = CROSSCUT_NONE;
+  if(color != C_EMPTY && isDiamond(physicalLoc))
+    direction = secondCrosscut ? CROSSCUT_SLASH : variant == QuaxVariant::DoubleCrosscut ? CROSSCUT_BOTH : CROSSCUT_BACKSLASH;
+  colors[physicalLoc] = color;
+  crosscutDirections[physicalLoc] = direction;
+  pos_hash ^= ZOBRIST_BOARD_HASH[physicalLoc][colorOld];
+  pos_hash ^= ZOBRIST_BOARD_HASH[physicalLoc][color];
+  pos_hash ^= ZOBRIST_CROSSCUT_DIRECTION_HASH[physicalLoc][directionOld];
+  pos_hash ^= ZOBRIST_CROSSCUT_DIRECTION_HASH[physicalLoc][direction];
 
   if(colorOld != C_EMPTY)
     stonenum--;
@@ -258,9 +388,10 @@ bool Board::setStone(Loc loc, Color color)
 bool Board::setStones(std::vector<Move> placements) {
   std::set<Loc> locs;
   for(const Move& placement: placements) {
-    if(locs.find(placement.loc) != locs.end())
+    Loc physicalLoc = getPhysicalLoc(placement.loc);
+    if(locs.find(physicalLoc) != locs.end())
       return false;
-    locs.insert(placement.loc);
+    locs.insert(physicalLoc);
   }
   // First empty out all locations that we plan to set.
   // This guarantees avoiding any intermediate liberty issues.
@@ -309,12 +440,12 @@ void Board::checkConsistency() const {
 
 
   vector<Loc> buf;
-  Hash128 tmp_pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size];
-  int emptyCount = 0;
+  Hash128 tmp_pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size] ^ ZOBRIST_VARIANT_HASH[(int)variant];
   for(Loc loc = 0; loc < MAX_ARR_SIZE; loc++) {
     int x = Location::getX(loc,x_size);
     int y = Location::getY(loc,x_size);
-    if(x < 0 || x >= x_size || y < 0 || y >= y_size) {
+    bool playable = x >= 0 && x < x_size && y >= 0 && y < y_size && (y % 2 == 0 || x < x_size-1);
+    if(!playable) {
       if(colors[loc] != C_WALL)
         throw StringError(errLabel + "Non-WALL value outside of board legal area");
     }
@@ -322,9 +453,21 @@ void Board::checkConsistency() const {
       if(colors[loc] == C_BLACK || colors[loc] == C_WHITE) {
         tmp_pos_hash ^= ZOBRIST_BOARD_HASH[loc][colors[loc]];
         tmp_pos_hash ^= ZOBRIST_BOARD_HASH[loc][C_EMPTY];
+        CrosscutDirection expectedDirection = CROSSCUT_NONE;
+        if(y % 2 == 1) {
+          expectedDirection = crosscutDirections[loc];
+          if(variant == QuaxVariant::DoubleCrosscut && expectedDirection != CROSSCUT_BOTH)
+            throw StringError(errLabel + "Invalid double-crosscut direction");
+          if(QuaxVariantIO::hasDirectionalCrosscuts(variant) && expectedDirection != CROSSCUT_BACKSLASH && expectedDirection != CROSSCUT_SLASH)
+            throw StringError(errLabel + "Invalid single-crosscut direction");
+        }
+        else if(crosscutDirections[loc] != CROSSCUT_NONE)
+          throw StringError(errLabel + "Crosscut direction on octagon");
+        tmp_pos_hash ^= ZOBRIST_CROSSCUT_DIRECTION_HASH[loc][expectedDirection];
       }
       else if(colors[loc] == C_EMPTY) {
-        emptyCount += 1;
+        if(crosscutDirections[loc] != CROSSCUT_NONE)
+          throw StringError(errLabel + "Crosscut direction on empty location");
       }
       else
         throw StringError(errLabel + "Non-(black,white,empty) value within board legal area");
@@ -354,10 +497,14 @@ bool Board::isEqualForTesting(const Board& other) const {
     return false;
   if(y_size != other.y_size)
     return false;
+  if(variant != other.variant)
+    return false;
   if(pos_hash != other.pos_hash)
     return false;
   for(int i = 0; i<MAX_ARR_SIZE; i++) {
     if(colors[i] != other.colors[i])
+      return false;
+    if(crosscutDirections[i] != other.crosscutDirections[i])
       return false;
   }
   //We don't require that the chain linked lists are in the same order.
@@ -427,8 +574,8 @@ string Location::toStringMach(Loc loc, int x_size)
   if(loc == Board::NULL_LOC)
     return string("null");
 
-  int x = getX(loc, x_size), y = getY(loc, x_size);
-  int x_print = 2 * x + y + 1, y_print = 2 * y + 1;
+  int x_print = getX(loc, x_size);
+  int y_print = getY(loc, x_size);
 
   char buf[128];
   sprintf(buf, "(%d,%d)", x_print, y_print);
@@ -437,44 +584,49 @@ string Location::toStringMach(Loc loc, int x_size)
 
 string Location::toString(Loc loc, int x_size, int y_size)
 {
-  if(x_size > 25 * 5 || y_size > 25 * 5)
+  if(x_size > 26 * 5 || y_size > 26 * 5)
     return toStringMach(loc,x_size);
   if(loc == Board::PASS_LOC)
     return string("pass");
   if(loc == Board::NULL_LOC)
     return string("null");
-  const char* xChar = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
+  const char* xChar = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   int x = getX(loc,x_size);
   int y = getY(loc,x_size);
   if(x >= x_size || x < 0 || y < 0 || y >= y_size)
     return toStringMach(loc,x_size);
-  int x_print = 2 * x + y + 1, y_print = 2 * y + 1, y_size_print = y_size * 2 + 1;
-
   char buf[128];
-  if(x_print <= 24)
-    sprintf(buf, "%c%d", xChar[x_print], y_size_print - y_print);
+  int row = y / 2 + 1;
+  if(x <= 25)
+    sprintf(buf, y % 2 == 0 ? "%c%d" : "%c%d*", xChar[x], row);
   else
-    sprintf(buf, "%c%c%d", xChar[x_print / 25 - 1], xChar[x_print % 25], y_size_print - y_print);
+    sprintf(buf, y % 2 == 0 ? "%c%c%d" : "%c%c%d*", xChar[x / 26 - 1], xChar[x % 26], row);
   return string(buf);
 }
 
 string Location::toString(Loc loc, const Board& b) {
-  return toString(loc,b.x_size,b.y_size);
+  if(b.isSecondCrosscutLoc(loc))
+    return toString(b.getPhysicalLoc(loc),b.x_size,b.y_size) + "/";
+  string s = toString(loc,b.x_size,b.y_size);
+  if(QuaxVariantIO::hasDirectionalCrosscuts(b.variant) && b.isDiamond(loc))
+    s += "\\";
+  return s;
 }
 
 string Location::toStringMach(Loc loc, const Board& b) {
-  return toStringMach(loc,b.x_size);
+  if(b.isSecondCrosscutLoc(loc))
+    return toStringMach(b.getPhysicalLoc(loc),b.x_size) + "/";
+  string s = toStringMach(loc,b.x_size);
+  if(QuaxVariantIO::hasDirectionalCrosscuts(b.variant) && b.isDiamond(loc))
+    s += "\\";
+  return s;
 }
 
 static bool tryParseLetterCoordinate(char c, int& x) {
-  if(c >= 'A' && c <= 'H')
+  if(c >= 'A' && c <= 'Z')
     x = c-'A';
-  else if(c >= 'a' && c <= 'h')
+  else if(c >= 'a' && c <= 'z')
     x = c-'a';
-  else if(c >= 'J' && c <= 'Z')
-    x = c-'A'-1;
-  else if(c >= 'j' && c <= 'z')
-    x = c-'a'-1;
   else
     return false;
   return true;
@@ -501,13 +653,7 @@ bool Location::tryOfString(const string& str, int x_size, int y_size, Loc& resul
     bool sucY = Global::tryStringToInt(pieces[1],y);
     if(!sucX || !sucY)
       return false;
-    if(y % 2 == 0)
-      return false;
-    y = (y - 1) / 2;
-    if((x - y) % 2 == 0)
-      return false;
-    x = (x - y - 1) / 2;
-    if(x < 0 || y < 0 || x >= x_size || y >= y_size)
+    if(x < 0 || y < 0 || x >= x_size || y >= y_size || (y % 2 == 1 && x == x_size-1))
       return false;
     result = Location::getLoc(x,y,x_size);
     return true;
@@ -522,25 +668,24 @@ bool Location::tryOfString(const string& str, int x_size, int y_size, Loc& resul
       int x1;
       if(!tryParseLetterCoordinate(s[1],x1))
         return false;
-      x = (x+1) * 25 + x1;
+      x = (x+1) * 26 + x1;
       s = s.substr(2,s.length()-2);
     }
     else {
       s = s.substr(1,s.length()-1);
     }
 
+    bool diamond = !s.empty() && s[s.length()-1] == '*';
+    if(diamond)
+      s.erase(s.length()-1);
     int y;
     bool sucY = Global::tryStringToInt(s,y);
     if(!sucY)
       return false;
-    y = y_size * 2 + 1 - y;
-    if(y % 2 == 0)
+    if(y < 1)
       return false;
-    y = (y - 1) / 2;
-    if((x - y) % 2 == 0)
-      return false;
-    x = (x - y - 1) / 2;
-    if(x < 0 || y < 0 || x >= x_size || y >= y_size)
+    y = 2 * (y - 1) + (diamond ? 1 : 0);
+    if(x < 0 || y < 0 || x >= x_size || y >= y_size || (diamond && x >= x_size-1))
       return false;
     result = Location::getLoc(x,y,x_size);
     return true;
@@ -556,11 +701,44 @@ bool Location::tryOfStringAllowNull(const string& str, int x_size, int y_size, L
 }
 
 bool Location::tryOfString(const string& str, const Board& b, Loc& result) {
-  return tryOfString(str,b.x_size,b.y_size,result);
+  string s = Global::trim(str);
+  bool backslash = !s.empty() && s[s.length()-1] == '\\';
+  bool slash = !s.empty() && s[s.length()-1] == '/';
+  if(backslash || slash)
+    s.erase(s.length()-1);
+  Loc physicalLoc;
+  if(!tryOfString(s,b.x_size,b.y_size,physicalLoc))
+    return false;
+  if(physicalLoc == Board::PASS_LOC) {
+    if(backslash || slash)
+      return false;
+    result = physicalLoc;
+    return true;
+  }
+  if(b.variant == QuaxVariant::DoubleCrosscut) {
+    if(backslash || slash)
+      return false;
+    result = physicalLoc;
+    return true;
+  }
+  if(b.isDiamond(physicalLoc)) {
+    if(!backslash && !slash)
+      return false;
+    result = slash ? b.getSecondCrosscutLoc(physicalLoc) : physicalLoc;
+    return true;
+  }
+  if(backslash || slash)
+    return false;
+  result = physicalLoc;
+  return true;
 }
 
 bool Location::tryOfStringAllowNull(const string& str, const Board& b, Loc& result) {
-  return tryOfStringAllowNull(str,b.x_size,b.y_size,result);
+  if(str == "null") {
+    result = Board::NULL_LOC;
+    return true;
+  }
+  return tryOfString(str,b,result);
 }
 
 Loc Location::ofString(const string& str, int x_size, int y_size) {
@@ -578,12 +756,18 @@ Loc Location::ofStringAllowNull(const string& str, int x_size, int y_size) {
 }
 
 Loc Location::ofString(const string& str, const Board& b) {
-  return ofString(str,b.x_size,b.y_size);
+  Loc result;
+  if(tryOfString(str,b,result))
+    return result;
+  throw StringError("Could not parse board location: " + str);
 }
 
 
 Loc Location::ofStringAllowNull(const string& str, const Board& b) {
-  return ofStringAllowNull(str,b.x_size,b.y_size);
+  Loc result;
+  if(tryOfStringAllowNull(str,b,result))
+    return result;
+  throw StringError("Could not parse board location: " + str);
 }
 
 vector<Loc> Location::parseSequence(const string& str, const Board& board) {
@@ -604,15 +788,15 @@ void Board::printBoard(ostream& out, const Board& board, Loc markLoc, const vect
   out << "HASH: " << board.pos_hash << "\n";
   bool showCoords = board.x_size <= 50 && board.y_size <= 50;
   if(showCoords) {
-    const char* xChar = "ABCDEFGHJKLMNOPQRSTUVWXYZ";
+    const char* xChar = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     out << "  ";
     for(int x = 0; x < board.x_size; x++) {
-      if(x <= 24) {
+      if(x <= 25) {
         out << " ";
         out << xChar[x];
       }
       else {
-        out << "A" << xChar[x-25];
+        out << "A" << xChar[x-26];
       }
     }
     out << "\n";
@@ -622,14 +806,16 @@ void Board::printBoard(ostream& out, const Board& board, Loc markLoc, const vect
   {
     if(showCoords) {
       char buf[16];
-      sprintf(buf,"%2d",board.y_size-y);
+      sprintf(buf,"%2d",y / 2 + 1);
       out << buf << ' ';
     }
+    if(y % 2 == 1)
+      out << " ";
     for(int x = 0; x < board.x_size; x++)
     {
       Loc loc = Location::getLoc(x,y,board.x_size);
       char s = PlayerIO::colorToChar(board.colors[loc]);
-      if(board.colors[loc] == C_EMPTY && markLoc == loc)
+      if(board.colors[loc] == C_EMPTY && board.getPhysicalLoc(markLoc) == loc)
         out << '@';
       else
         out << s;
@@ -638,7 +824,7 @@ void Board::printBoard(ostream& out, const Board& board, Loc markLoc, const vect
       if(hist != NULL) {
         size_t start = hist->size() >= 3 ? hist->size()-3 : 0;
         for(size_t i = 0; start+i < hist->size(); i++) {
-          if((*hist)[start+i].loc == loc) {
+          if(board.getPhysicalLoc((*hist)[start+i].loc) == loc) {
             out << (1+i);
             histMarked = true;
             break;
@@ -673,11 +859,19 @@ string Board::toStringSimple(const Board& board, char lineDelimiter) {
 }
 
 Board Board::parseBoard(int xSize, int ySize, const string& s) {
-  return parseBoard(xSize,ySize,s,'\n');
+  return parseBoard(xSize,ySize,QuaxVariant::DoubleCrosscut,s,'\n');
 }
 
 Board Board::parseBoard(int xSize, int ySize, const string& s, char lineDelimiter) {
-  Board board(xSize,ySize);
+  return parseBoard(xSize,ySize,QuaxVariant::DoubleCrosscut,s,lineDelimiter);
+}
+
+Board Board::parseBoard(int xSize, int ySize, QuaxVariant variant, const string& s) {
+  return parseBoard(xSize,ySize,variant,s,'\n');
+}
+
+Board Board::parseBoard(int xSize, int ySize, QuaxVariant variant, const string& s, char lineDelimiter) {
+  Board board(xSize,ySize,variant);
   vector<string> lines = Global::split(Global::trim(s),lineDelimiter);
 
   //Throw away coordinate labels line if it exists
@@ -707,7 +901,11 @@ Board Board::parseBoard(int xSize, int ySize, const string& s, char lineDelimite
         c = line[x*2];
 
       Loc loc = Location::getLoc(x,y,board.x_size);
-      if(c == '.' || c == ' ' || c == '*' || c == ',' || c == '`')
+      if(!board.isOnBoard(loc)) {
+        if(c != '#')
+          throw StringError("Board::parseBoard - expected wall at non-playable Quax location");
+      }
+      else if(c == '.' || c == ' ' || c == '*' || c == ',' || c == '`')
         continue;
       else if(c == 'o' || c == 'O') {
         bool suc = board.setStone(loc,P_WHITE);
@@ -730,14 +928,49 @@ nlohmann::json Board::toJson(const Board& board) {
   nlohmann::json data;
   data["xSize"] = board.x_size;
   data["ySize"] = board.y_size;
+  data["variant"] = QuaxVariantIO::toString(board.variant);
   data["stones"] = Board::toStringSimple(board,'|');
+  string directions;
+  for(int y = 0; y < board.y_size; y++) {
+    for(int x = 0; x < board.x_size; x++) {
+      Loc loc = Location::getLoc(x,y,board.x_size);
+      CrosscutDirection direction = board.isDiamond(loc) ? board.crosscutDirections[loc] : CROSSCUT_NONE;
+      directions += direction == CROSSCUT_BOTH ? 'b' : direction == CROSSCUT_BACKSLASH ? '\\' : direction == CROSSCUT_SLASH ? '/' : '.';
+    }
+    directions += '|';
+  }
+  data["crosscuts"] = directions;
   return data;
 }
 
 Board Board::ofJson(const nlohmann::json& data) {
   int xSize = data["xSize"].get<int>();
   int ySize = data["ySize"].get<int>();
-  Board board = Board::parseBoard(xSize,ySize,data["stones"].get<string>(),'|');
+  QuaxVariant variant = QuaxVariantIO::parse(data["variant"].get<string>());
+  Board board = Board::parseBoard(xSize,ySize,variant,data["stones"].get<string>(),'|');
+  vector<string> directionRows = Global::split(data["crosscuts"].get<string>(),'|');
+  if(directionRows.size() == (size_t)ySize+1 && directionRows.back().empty())
+    directionRows.pop_back();
+  if(directionRows.size() != (size_t)ySize)
+    throw StringError("Board::ofJson - invalid crosscut rows");
+  for(int y = 1; y < ySize; y += 2) {
+    if(directionRows[y].length() != (size_t)xSize)
+      throw StringError("Board::ofJson - invalid crosscut row length");
+    for(int x = 0; x < xSize-1; x++) {
+      Loc loc = Location::getLoc(x,y,xSize);
+      if(board.colors[loc] == C_EMPTY)
+        continue;
+      char direction = directionRows[y][x];
+      CrosscutDirection expected = variant == QuaxVariant::DoubleCrosscut ? CROSSCUT_BOTH : direction == '/' ? CROSSCUT_SLASH : CROSSCUT_BACKSLASH;
+      if((variant == QuaxVariant::DoubleCrosscut && direction != 'b') ||
+         (QuaxVariantIO::hasDirectionalCrosscuts(variant) && direction != '\\' && direction != '/'))
+        throw StringError("Board::ofJson - invalid crosscut direction");
+      if(expected != board.crosscutDirections[loc]) {
+        Color color = board.colors[loc];
+        board.setStone(loc,C_EMPTY);
+        board.setStone(board.getSecondCrosscutLoc(loc),color);
+      }
+    }
+  }
   return board;
 }
-

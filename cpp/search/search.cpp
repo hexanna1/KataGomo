@@ -148,7 +148,7 @@ Player Search::getPlayoutDoublingAdvantagePla() const {
 }
 
 int Search::getPos(Loc moveLoc) const {
-  return NNPos::locToPos(moveLoc,rootBoard.x_size,nnXLen,nnYLen);
+  return NNPos::locToPos(moveLoc,rootBoard,nnXLen,nnYLen);
 }
 
 void Search::setPosition(Player pla, const Board& board, const BoardHistory& history) {
@@ -520,7 +520,7 @@ void Search::runWholeSearch(
 //should reasonably tolerate just continuing. We do NOT want to clear history because we could inadvertently make a move
 //that an external ruleset COULD think violated superko.
 void Search::beginSearch(bool pondering) {
-  if(rootBoard.x_size > nnXLen || rootBoard.y_size > nnYLen)
+  if(2 * rootBoard.x_size - 1 > nnXLen || rootBoard.y_size > nnYLen)
     throw StringError("Search got from NNEval nnXLen = " + Global::intToString(nnXLen) +
                       " nnYLen = " + Global::intToString(nnYLen) + " but was asked to search board with larger x or y size");
 

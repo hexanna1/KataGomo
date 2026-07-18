@@ -21,6 +21,39 @@ def huber_loss(x, y, delta):
 def constant_like(data, other_tensor):
     return torch.tensor(data, dtype=other_tensor.dtype, device=other_tensor.device, requires_grad=False)
 
+def policy_mask_from_inputs(input_binary_nchw, input_global_nc):
+    spatial_mask = input_binary_nchw[:, 0] > 0.5
+    single_crosscut = input_global_nc[:, 18] > 0.5
+    if not torch.any(single_crosscut):
+        policy_spatial_mask = spatial_mask
+    else:
+        active_rows = torch.any(spatial_mask, dim=2)
+        active_cols = torch.any(spatial_mask, dim=1)
+        top = torch.argmax(active_rows.to(torch.int64), dim=1)
+        left = torch.argmax(active_cols.to(torch.int64), dim=1)
+        board_len = torch.sum(active_rows, dim=1)
+
+        y = torch.arange(spatial_mask.shape[1], device=spatial_mask.device).view(1, -1, 1)
+        x = torch.arange(spatial_mask.shape[2], device=spatial_mask.device).view(1, 1, -1)
+        rel_y = y - top.view(-1, 1, 1)
+        rel_x = x - left.view(-1, 1, 1)
+        last = (board_len - 1).view(-1, 1, 1)
+
+        even_y = rel_y % 2 == 0
+        even_x = rel_x % 2 == 0
+        octagons = even_y & even_x
+        backslash_moves = even_y & ~even_x & (rel_y < last)
+        slash_moves = ~even_y & even_x & (rel_x < last)
+        single_crosscut_mask = spatial_mask & (octagons | backslash_moves | slash_moves)
+        policy_spatial_mask = torch.where(
+            single_crosscut.view(-1, 1, 1), single_crosscut_mask, spatial_mask
+        )
+
+    pass_mask = torch.ones(
+        (spatial_mask.shape[0], 1), dtype=torch.bool, device=spatial_mask.device
+    )
+    return torch.cat((policy_spatial_mask.flatten(1), pass_mask), dim=1)
+
 class Metrics:
     def __init__(self, batch_size: int, world_size: int, raw_model: Model):
         self.n = batch_size
@@ -453,7 +486,8 @@ class Metrics:
         h = input_binary_nchw.shape[2]
         w = input_binary_nchw.shape[3]
 
-        policymask = torch.cat((mask.view(n,h*w),mask.new_ones((n,1))),dim=1)
+        policymask = policy_mask_from_inputs(input_binary_nchw, input_global_nc)
+        policy_logits = policy_logits.masked_fill(~policymask.unsqueeze(1), -1.0e30)
 
         target_policy_player = target_policy_ncmove[:, 0, :]
         target_policy_player = target_policy_player / torch.sum(target_policy_player, dim=1, keepdim=True)

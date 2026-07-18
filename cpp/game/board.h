@@ -12,12 +12,32 @@
 #include "../external/nlohmann_json/json.hpp"
 
 #ifndef COMPILE_MAX_BOARD_LEN
-#define COMPILE_MAX_BOARD_LEN 19
+#define COMPILE_MAX_BOARD_LEN 21
 #endif
 
 //TYPES AND CONSTANTS-----------------------------------------------------------------
 
 struct Board;
+
+enum class QuaxVariant : int8_t {
+  DoubleCrosscut = 0,
+  SingleCrosscut = 1,
+  Official = 2,
+};
+
+namespace QuaxVariantIO {
+  std::string toString(QuaxVariant variant);
+  bool tryParse(const std::string& s, QuaxVariant& variant);
+  QuaxVariant parse(const std::string& s);
+  bool hasDirectionalCrosscuts(QuaxVariant variant);
+}
+
+enum CrosscutDirection : int8_t {
+  CROSSCUT_NONE = 0,
+  CROSSCUT_BOTH = 1,
+  CROSSCUT_BACKSLASH = 2,
+  CROSSCUT_SLASH = 3,
+};
 
 //Player
 typedef int8_t Player;
@@ -93,9 +113,12 @@ struct Board
   //Board parameters and Constants----------------------------------------
 
   static constexpr int MAX_LEN = COMPILE_MAX_BOARD_LEN;  //Maximum edge length allowed for the board
-  static constexpr int DEFAULT_LEN = std::min(MAX_LEN,19); //Default edge length for board if unspecified
+  static constexpr int DEFAULT_LEN = 10; //Default user-facing Quax board size
+  static constexpr int MAX_USER_SIZE = (MAX_LEN + 1) / 2;
   static constexpr int MAX_PLAY_SIZE = MAX_LEN * MAX_LEN;  //Maximum number of playable spaces
   static constexpr int MAX_ARR_SIZE = (MAX_LEN+1)*(MAX_LEN+2)+1; //Maximum size of arrays needed
+  static constexpr int MAX_CROSSCUTS = (MAX_USER_SIZE-1)*(MAX_USER_SIZE-1);
+  static constexpr Loc SECOND_CROSSCUT_LOC_BASE = MAX_ARR_SIZE-MAX_CROSSCUTS;
 
   //Location used to indicate an invalid spot on the board.
   static constexpr Loc NULL_LOC = 0;
@@ -111,6 +134,8 @@ struct Board
   static Hash128 ZOBRIST_LASTMOVE_HASH[MAX_ARR_SIZE];
   static Hash128 ZOBRIST_BOARD_HASH2[MAX_ARR_SIZE][4];
   static Hash128 ZOBRIST_PLAYER_HASH[4];
+  static Hash128 ZOBRIST_CROSSCUT_DIRECTION_HASH[MAX_ARR_SIZE][4];
+  static Hash128 ZOBRIST_VARIANT_HASH[3];
   static const Hash128 ZOBRIST_GAME_IS_OVER;
 
   static bool IS_CAPTURETABLE_INITALIZED;
@@ -123,8 +148,9 @@ struct Board
   //Structs---------------------------------------
 
   //Constructors---------------------------------
-  Board();  //Create Board of size (DEFAULT_LEN,DEFAULT_LEN)
+  Board();  //Create a board of the default Quax size
   Board(int x, int y); //Create Board of size (x,y)
+  Board(int x, int y, QuaxVariant variant);
   Board(const Board& other);
 
   Board& operator=(const Board&) = default;
@@ -134,13 +160,21 @@ struct Board
   bool isLegal(Loc loc, Player pla) const;
   //Check if this location is on the board
   bool isOnBoard(Loc loc) const;
+  bool isDiamond(Loc loc) const;
+  bool isSecondCrosscutLoc(Loc loc) const;
+  Loc getPhysicalLoc(Loc loc) const;
+  Loc getSecondCrosscutLoc(Loc diamondLoc) const;
+  CrosscutDirection getCrosscutDirectionForMove(Loc loc) const;
+  int playableArea() const;
+  static bool isValidQuaxDimensions(int xSize, int ySize);
+  static int internalYSizeForUserSize(int size);
   //Is this board empty?
   bool isEmpty() const;
   //Count the number of stones on the board
   int numStonesOnBoard() const;
   int numPlaStonesOnBoard(Player pla) const;
   bool isDeadOrCaptured(Loc loc) const;
-  bool checkConnection(int8_t* buf, Player pla, bool includeJumpConnection) const;
+  bool checkConnection(int8_t* buf, Player pla) const;
 
   //Sets the specified stone if possible, including overwriting existing stones.
   //Resolves any captures and/or suicides that result from setting that stone, including deletions of the stone itself.
@@ -167,6 +201,8 @@ struct Board
 
   static Board parseBoard(int xSize, int ySize, const std::string& s);
   static Board parseBoard(int xSize, int ySize, const std::string& s, char lineDelimiter);
+  static Board parseBoard(int xSize, int ySize, QuaxVariant variant, const std::string& s);
+  static Board parseBoard(int xSize, int ySize, QuaxVariant variant, const std::string& s, char lineDelimiter);
   static void printBoard(std::ostream& out, const Board& board, Loc markLoc, const std::vector<Move>* hist);
   static std::string toStringSimple(const Board& board, char lineDelimiter);
   static nlohmann::json toJson(const Board& board);
@@ -176,7 +212,9 @@ struct Board
 
   int x_size;                  //Horizontal size of board
   int y_size;                  //Vertical size of board
+  QuaxVariant variant;
   Color colors[MAX_ARR_SIZE];  //Color of each location on the board.
+  CrosscutDirection crosscutDirections[MAX_ARR_SIZE];
   int movenum; //how many moves
   int stonenum; //how many stones on board
 
@@ -187,7 +225,7 @@ struct Board
   short adj_offsets[8]; //Indices 0-3: Offsets to add for adjacent points. Indices 4-7: Offsets for diagonal points. 2 and 3 are +x and +y.
 
   private:
-  void init(int xS, int yS);
+  void init(int xS, int yS, QuaxVariant variant);
 
   friend std::ostream& operator<<(std::ostream& out, const Board& board);
 

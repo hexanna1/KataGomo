@@ -55,7 +55,7 @@ Loc PlayUtils::chooseRandomPolicyMove(
   double relProbs[NNPos::MAX_NN_POLICY_SIZE];
   int locs[NNPos::MAX_NN_POLICY_SIZE];
   for(int pos = 0; pos<NNPos::MAX_NN_POLICY_SIZE; pos++) {
-    Loc loc = NNPos::posToLoc(pos,board.x_size,board.y_size,nnXLen,nnYLen);
+    Loc loc = NNPos::posToLoc(pos,board,nnXLen,nnYLen);
     if((loc == Board::PASS_LOC && !allowPass) || loc == banMove)
       continue;
     if(policyProbs[pos] > 0.0 && hist.isLegal(board,loc,pla)) {
@@ -91,13 +91,13 @@ Loc PlayUtils::getGameInitializationMove(
   vector<double> playSelectionValues;
   int nnXLen = nnOutput->nnXLen;
   int nnYLen = nnOutput->nnYLen;
-  testAssert(nnXLen >= board.x_size);
+  testAssert(nnXLen >= 2 * board.x_size - 1);
   testAssert(nnYLen >= board.y_size);
   testAssert(nnXLen > 0 && nnXLen < 100); //Just a sanity check to make sure no other crazy values have snuck in
   testAssert(nnYLen > 0 && nnYLen < 100); //Just a sanity check to make sure no other crazy values have snuck in
   int policySize = NNPos::getPolicySize(nnXLen,nnYLen);
   for(int movePos = 0; movePos<policySize; movePos++) {
-    Loc moveLoc = NNPos::posToLoc(movePos,board.x_size,board.y_size,nnXLen,nnYLen);
+    Loc moveLoc = NNPos::posToLoc(movePos,board,nnXLen,nnYLen);
     double policyProb = nnOutput->policyProbs[movePos];
     if(!hist.isLegal(board,moveLoc,pla) || policyProb <= 0)
       continue;
@@ -409,5 +409,4 @@ Rules PlayUtils::genRandomRules(Rand& rand) {
 
   return rules;
 }
-
 

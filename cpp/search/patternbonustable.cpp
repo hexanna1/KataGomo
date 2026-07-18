@@ -9,6 +9,9 @@
 
 using namespace std;
 
+//The compressed Quax board coordinates preserve local pattern windows under top-bottom reflection only.
+static constexpr int NUM_PATTERN_SYMMETRIES = 2;
+
 static std::mutex initMutex;
 static std::atomic<bool> isInited(false);
 static LocalPatternHasher patternHasher;
@@ -54,7 +57,7 @@ Hash128 PatternBonusTable::getHash(Player pla, Loc moveLoc, const Board& board) 
   if(moveLoc == Board::NULL_LOC || moveLoc == Board::PASS_LOC )
     return Hash128();
 
-  Hash128 hash = patternHasher.getHash(board,moveLoc,pla);
+  Hash128 hash = patternHasher.getHash(board,board.getPhysicalLoc(moveLoc),pla);
   hash ^= ZOBRIST_MOVE_LOCS[moveLoc];
   hash ^= Board::ZOBRIST_SIZE_X_HASH[board.x_size];
   hash ^= Board::ZOBRIST_SIZE_Y_HASH[board.y_size];
@@ -89,7 +92,7 @@ void PatternBonusTable::addBonus(Player pla, Loc moveLoc, const Board& board, do
   if(moveLoc == Board::NULL_LOC || moveLoc == Board::PASS_LOC )
     return;
 
-  Hash128 hash = patternHasher.getHashWithSym(board,moveLoc,pla,symmetry,flipColors);
+  Hash128 hash = patternHasher.getHashWithSym(board,board.getPhysicalLoc(moveLoc),pla,symmetry,flipColors);
   hash ^= ZOBRIST_MOVE_LOCS[SymmetryHelpers::getSymLoc(moveLoc,board,symmetry)];
   if(SymmetryHelpers::isTranspose(symmetry)) {
     hash ^= Board::ZOBRIST_SIZE_X_HASH[board.y_size];
@@ -127,7 +130,7 @@ void PatternBonusTable::addBonusForGameMoves(const BoardHistory& game, double bo
       break;
     if(onlyPla == C_EMPTY || onlyPla == pla) {
       for(int flipColors = 0; flipColors < 2; flipColors++) {
-        for(int symmetry = 0; symmetry < 8; symmetry++) {
+        for(int symmetry = 0; symmetry < NUM_PATTERN_SYMMETRIES; symmetry++) {
           //getRecentBoard(1) - the convention is to pattern match on the board BEFORE the move is played.
           //This is also more pricipled than convening on the board after since with different captures, moves
           //may have different effects even while leading to the same position.
@@ -187,7 +190,7 @@ void PatternBonusTable::avoidRepeatedSgfMoves(
         return;
 
       for(int flipColorsInt = 0; flipColorsInt < 2; flipColorsInt++) {
-        for(int symmetry = 0; symmetry < 8; symmetry++) {
+        for(int symmetry = 0; symmetry < NUM_PATTERN_SYMMETRIES; symmetry++) {
           //getRecentBoard(1) - the convention is to pattern match on the board BEFORE the move is played.
           //This is also more pricipled than convening on the board after since with different captures, moves
           //may have different effects even while leading to the same position.

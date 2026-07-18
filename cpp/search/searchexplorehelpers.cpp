@@ -386,7 +386,7 @@ void Search::selectBestChildToDescend(
     if(alreadyTried)
       continue;
 
-    Loc moveLoc = NNPos::posToLoc(movePos,thread.board.x_size,thread.board.y_size,nnXLen,nnYLen);
+    Loc moveLoc = NNPos::posToLoc(movePos,thread.board,nnXLen,nnYLen);
     if(moveLoc == Board::NULL_LOC)
       continue;
 

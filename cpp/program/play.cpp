@@ -50,11 +50,14 @@ void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
   if(allowedScoringRules.size() <= 0)
     throw IOError("scoringRules must have at least one value in " + cfg.getFileName());
 
+  quaxVariant = cfg.contains("quaxVariant") ? QuaxVariantIO::parse(cfg.getString("quaxVariant")) : QuaxVariant::DoubleCrosscut;
+  logger.write("Using Quax variant " + QuaxVariantIO::toString(quaxVariant));
 
-  allowedBSizes = cfg.getInts("bSizes", 2, Board::MAX_LEN);
+  allowedBSizes = cfg.getInts("bSizes", 2, Board::MAX_USER_SIZE);
   allowedBSizeRelProbs = cfg.getDoubles("bSizeRelProbs",0.0,1e100);
 
-  allowRectangleProb = cfg.contains("allowRectangleProb") ? cfg.getDouble("allowRectangleProb",0.0,1.0) : 0.0;
+  if(cfg.contains("allowRectangleProb") && cfg.getDouble("allowRectangleProb",0.0,1.0) != 0.0)
+    throw IOError("allowRectangleProb is not supported for Quax in " + cfg.getFileName());
 
   auto generateCumProbs = [](const vector<Sgf::PositionSample> poses, double lambda, double& effectiveSampleSize) {
     int minInitialTurnNumber = 0;
@@ -205,14 +208,14 @@ void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
     throw IOError("bSizes and bSizeRelProbs must have same number of values in " + cfg.getFileName());
 
   minBoardXSize = allowedBSizes[0];
-  minBoardYSize = allowedBSizes[0];
+  minBoardYSize = Board::internalYSizeForUserSize(allowedBSizes[0]);
   maxBoardXSize = allowedBSizes[0];
-  maxBoardYSize = allowedBSizes[0];
+  maxBoardYSize = Board::internalYSizeForUserSize(allowedBSizes[0]);
   for(int bSize: allowedBSizes) {
     minBoardXSize = std::min(minBoardXSize, bSize);
-    minBoardYSize = std::min(minBoardYSize, bSize);
+    minBoardYSize = std::min(minBoardYSize, Board::internalYSizeForUserSize(bSize));
     maxBoardXSize = std::max(maxBoardXSize, bSize);
-    maxBoardYSize = std::max(maxBoardYSize, bSize);
+    maxBoardYSize = std::max(maxBoardYSize, Board::internalYSizeForUserSize(bSize));
   }
   for(const Sgf::PositionSample& pos : hintPoses) {
     minBoardXSize = std::min(minBoardXSize, pos.board.x_size);
@@ -288,9 +291,7 @@ Rules GameInitializer::randomizeScoringAndTaxRules(Rules rules, Rand& randToUse)
 bool GameInitializer::isAllowedBSize(int xSize, int ySize) {
   if(!contains(allowedBSizes,xSize))
     return false;
-  if(!contains(allowedBSizes,ySize))
-    return false;
-  if(allowRectangleProb <= 0.0 && xSize != ySize)
+  if(ySize != Board::internalYSizeForUserSize(xSize))
     return false;
   return true;
 }
@@ -345,9 +346,6 @@ void GameInitializer::createGameSharedUnsynchronized(
 
 
   int xSizeIdx = rand.nextUInt(allowedBSizeRelProbs.data(),allowedBSizeRelProbs.size());
-  int ySizeIdx = xSizeIdx;
-  if(allowRectangleProb > 0 && rand.nextBool(allowRectangleProb))
-    ySizeIdx = rand.nextUInt(allowedBSizeRelProbs.data(),allowedBSizeRelProbs.size());
 
   Rules rules = createRulesUnsynchronized();
 
@@ -398,17 +396,17 @@ void GameInitializer::createGameSharedUnsynchronized(
   }
   else {
     int xSize = allowedBSizes[xSizeIdx];
-    int ySize = allowedBSizes[ySizeIdx];
+    int ySize = Board::internalYSizeForUserSize(xSize);
 
     if(rand.nextBool(moveLimitProb)) {
       //int maxMoves = int(pow(rand.nextDouble(), moveLimitAreaPow) * xSize * ySize);
 
       //shortest win ~ 0.60*x^1.9
       //low draw rate ~ 0.70*x^1.9
-      double maxMovesD = 0.65 * pow(xSize * ySize, 0.95);
+      double maxMovesD = 0.65 * pow(xSize * xSize + (xSize-1) * (xSize-1), 0.95);
       double mmStdev = rand.nextBool(0.2) ? 2.0 * xSize : 0.7 * xSize;
       int maxMoves = int(maxMovesD + mmStdev * rand.nextGaussian());
-      if(maxMoves >= xSize * ySize)
+      if(maxMoves >= xSize * xSize + (xSize-1) * (xSize-1))
         maxMoves = 0;
       if(maxMoves < xSize)
         maxMoves = 0;
@@ -416,7 +414,7 @@ void GameInitializer::createGameSharedUnsynchronized(
     }
 
 
-    board = Board(xSize,ySize);
+    board = Board(xSize,ySize,quaxVariant);
     pla = P_BLACK;
     hist.clear(board,pla,rules);
 
@@ -736,7 +734,11 @@ static void extractPolicyTarget(
   (void)success; //Avoid warning when asserts are disabled
 
   assert(locsBuf.size() == playSelectionValuesBuf.size());
-  assert(locsBuf.size() <= toMoveBot->rootBoard.x_size * toMoveBot->rootBoard.y_size + 1);
+  const Board& board = toMoveBot->rootBoard;
+  int maxPolicyMoves = board.playableArea() + 1;
+  if(QuaxVariantIO::hasDirectionalCrosscuts(board.variant))
+    maxPolicyMoves += (board.x_size-1) * (board.x_size-1);
+  assert(locsBuf.size() <= maxPolicyMoves);
 
   //Make sure we don't overflow int16
   double maxValue = 0.0;
@@ -1477,7 +1479,7 @@ FinishedGameData* Play::runGame(
     //Check for resignation
     if(playSettings.allowResignation && thisGameAllowResignation && historicalMctsWinLossValues.size() >= playSettings.resignConsecTurns) {
       //Play at least some moves no matter what
-      int minTurnForResignation = 1 + board.x_size * board.y_size / 10;
+      int minTurnForResignation = 1 + board.playableArea() / 10;
       if(i >= minTurnForResignation) {
         if(playSettings.resignThreshold > 0 || std::isnan(playSettings.resignThreshold))
           throw StringError("playSettings.resignThreshold > 0 || std::isnan(playSettings.resignThreshold)");
@@ -1569,7 +1571,7 @@ FinishedGameData* Play::runGame(
       assert(rawNNValues.size() == gameData->targetWeightByTurn.size());
       valueSurpriseByTurn.resize(rawNNValues.size());
 
-      int boardArea = board.x_size * board.y_size;
+      int boardArea = board.playableArea();
       double nowFactor = 1.0/(1.0 + boardArea * 0.016);
 
       double winValue = whiteValueTargetsByTurn[whiteValueTargetsByTurn.size()-1].win;

@@ -13,6 +13,16 @@ cpp/build_opencl
 cpp/build_eigen
 cpp/out
 
+/build-opencl/
+/scripts/*/data*/
+/scripts/*/ktmp*/
+/scripts/*/gtp_logs*/
+/scripts/*/__pycache__/
+/scripts/**/*.py
+!/scripts/play_*.py
+/gtp_logs/
+*.md
+
 
 
 
@@ -23,6 +33,7 @@ cpp/out
 *.exe
 *~
 __pycache__
+*.pyc
 *.h5
 *.log
 *.cbp
@@ -101,4 +112,3 @@ tmpsgf/
 watchgame.txt
 models/
 python/startposesupload.txt
-

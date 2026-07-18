@@ -5,21 +5,97 @@ using namespace std;
 int NNPos::xyToPos(int x, int y, int nnXLen) {
   return y * nnXLen + x;
 }
-int NNPos::locToPos(Loc loc, int boardXSize, int nnXLen, int nnYLen) {
+int NNPos::boardLocToPos(Loc loc, const Board& board, int nnXLen, int nnYLen) {
+  int x = Location::getX(loc,board.x_size);
+  int y = Location::getY(loc,board.x_size);
+  if(!board.isOnBoard(loc) || y >= nnYLen)
+    return nnXLen * (nnYLen + 1);
+  return y * nnXLen + 2*x + (y & 1);
+}
+
+static bool isSecondCrosscutLoc(Loc loc, int boardXSize, QuaxVariant variant) {
+  if(!QuaxVariantIO::hasDirectionalCrosscuts(variant) || loc < Board::SECOND_CROSSCUT_LOC_BASE || loc >= Board::MAX_ARR_SIZE)
+    return false;
+  return loc-Board::SECOND_CROSSCUT_LOC_BASE < (boardXSize-1)*(boardXSize-1);
+}
+
+static Loc getPhysicalLoc(Loc loc, int boardXSize, QuaxVariant variant) {
+  if(!isSecondCrosscutLoc(loc,boardXSize,variant))
+    return loc;
+  int index = loc-Board::SECOND_CROSSCUT_LOC_BASE;
+  return Location::getLoc(index%(boardXSize-1),2*(index/(boardXSize-1))+1,boardXSize);
+}
+
+static Loc getSecondCrosscutLoc(Loc diamondLoc, int boardXSize) {
+  int x = Location::getX(diamondLoc,boardXSize);
+  int row = Location::getY(diamondLoc,boardXSize)/2;
+  return Board::SECOND_CROSSCUT_LOC_BASE + row*(boardXSize-1)+x;
+}
+
+int NNPos::locToPos(Loc loc, int boardXSize, int boardYSize, QuaxVariant variant, int nnXLen, int nnYLen) {
   if(loc == Board::PASS_LOC)
     return nnXLen * nnYLen;
   else if(loc == Board::NULL_LOC)
     return nnXLen * (nnYLen + 1);
-  return Location::getY(loc,boardXSize) * nnXLen + Location::getX(loc,boardXSize);
+  bool secondCrosscut = isSecondCrosscutLoc(loc,boardXSize,variant);
+  Loc physicalLoc = getPhysicalLoc(loc,boardXSize,variant);
+  int x = Location::getX(physicalLoc,boardXSize);
+  int y = Location::getY(physicalLoc,boardXSize);
+  if(x < 0 || x >= boardXSize || y < 0 || y >= boardYSize || ((y & 1) != 0 && x >= boardXSize-1))
+    return nnXLen * (nnYLen + 1);
+  int nnX;
+  if(QuaxVariantIO::hasDirectionalCrosscuts(variant) && (y & 1) != 0) {
+    if(secondCrosscut)
+      nnX = 2*x;
+    else {
+      nnX = 2*x+1;
+      y -= 1;
+    }
+  }
+  else
+    nnX = 2*x + (y & 1);
+  if(nnX < 0 || nnX >= nnXLen || y < 0 || y >= nnYLen)
+    return nnXLen * (nnYLen + 1);
+  return y * nnXLen + nnX;
 }
-Loc NNPos::posToLoc(int pos, int boardXSize, int boardYSize, int nnXLen, int nnYLen) {
+
+int NNPos::locToPos(Loc loc, const Board& board, int nnXLen, int nnYLen) {
+  return locToPos(loc,board.x_size,board.y_size,board.variant,nnXLen,nnYLen);
+}
+
+Loc NNPos::posToLoc(int pos, int boardXSize, int boardYSize, QuaxVariant variant, int nnXLen, int nnYLen) {
   if(pos == nnXLen * nnYLen)
     return Board::PASS_LOC;
-  int x = pos % nnXLen;
+  int nnX = pos % nnXLen;
   int y = pos / nnXLen;
-  if(x < 0 || x >= boardXSize || y < 0 || y >= boardYSize)
+  if(nnX < 0 || y < 0 || y >= boardYSize || nnX >= 2*boardXSize-1)
+    return Board::NULL_LOC;
+  if(QuaxVariantIO::hasDirectionalCrosscuts(variant)) {
+    if((nnX & 1) == 0 && (y & 1) == 0) {
+      int x = nnX/2;
+      return Location::getLoc(x,y,boardXSize);
+    }
+    if((nnX & 1) != 0 && (y & 1) == 0 && y+1 < boardYSize) {
+      int x = (nnX-1)/2;
+      return Location::getLoc(x,y+1,boardXSize);
+    }
+    if((nnX & 1) == 0 && (y & 1) != 0 && nnX/2 < boardXSize-1) {
+      Loc diamondLoc = Location::getLoc(nnX/2,y,boardXSize);
+      return getSecondCrosscutLoc(diamondLoc,boardXSize);
+    }
+    return Board::NULL_LOC;
+  }
+  int parity = y & 1;
+  if(nnX < parity || ((nnX-parity) & 1) != 0)
+    return Board::NULL_LOC;
+  int x = (nnX-parity)/2;
+  if(x >= boardXSize || (parity != 0 && x >= boardXSize-1))
     return Board::NULL_LOC;
   return Location::getLoc(x,y,boardXSize);
+}
+
+Loc NNPos::posToLoc(int pos, const Board& board, int nnXLen, int nnYLen) {
+  return posToLoc(pos,board.x_size,board.y_size,board.variant,nnXLen,nnYLen);
 }
 
 bool NNPos::isPassPos(int pos, int nnXLen, int nnYLen) {
@@ -184,8 +260,9 @@ void NNOutput::debugPrint(ostream& out, const Board& board) {
   out << "STWinlossError " << Global::strprintf("%.3f",shorttermWinlossError) << endl;
 
   out << "Policy" << endl;
-  for(int y = 0; y<board.y_size; y++) {
-    for(int x = 0; x<board.x_size; x++) {
+  int tensorBoardLen = 2 * board.x_size - 1;
+  for(int y = 0; y < tensorBoardLen; y++) {
+    for(int x = 0; x < tensorBoardLen; x++) {
       int pos = NNPos::xyToPos(x,y,nnXLen);
       float prob = policyProbs[pos];
       if(prob < 0)
@@ -201,60 +278,33 @@ void NNOutput::debugPrint(ostream& out, const Board& board) {
 //-------------------------------------------------------------------------------------------------------------
 
 static void copyWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int cSize, bool useNHWC, int symmetry, bool reverse) {
-  bool transpose = (symmetry & 0x4) != 0 && hSize == wSize;
-  bool flipX = (symmetry & 0x1) != 0;
+  assert(symmetry >= 0 && symmetry < 8);
+  bool transpose = (symmetry & 0x4) != 0;
+  bool flipX = (symmetry & 0x2) != 0;
   bool flipY = (symmetry & 0x1) != 0;
-  if(transpose && !reverse)
-    std::swap(flipX,flipY);
-  if(useNHWC) {
-    int nStride = hSize * wSize * cSize;
-    int hStride = wSize * cSize;
-    int wStride = cSize;
-    int hBaseNew = 0; int hStrideNew = hStride;
-    int wBaseNew = 0; int wStrideNew = wStride;
-
-    if(flipY) { hBaseNew = (hSize-1) * hStrideNew; hStrideNew = -hStrideNew; }
-    if(flipX) { wBaseNew = (wSize-1) * wStrideNew; wStrideNew = -wStrideNew; }
-
-    if(transpose)
-      std::swap(hStrideNew,wStrideNew);
-
-    for(int n = 0; n<nSize; n++) {
-      for(int h = 0; h<hSize; h++) {
-        int nhOld = n * nStride + h*hStride;
-        int nhNew = n * nStride + hBaseNew + h*hStrideNew;
-        for(int w = 0; w<wSize; w++) {
-          int nhwOld = nhOld + w*wStride;
-          int nhwNew = nhNew + wBaseNew + w*wStrideNew;
-          for(int c = 0; c<cSize; c++) {
-            dst[nhwNew + c] = src[nhwOld + c];
+  assert(!transpose || hSize == wSize);
+  int nStride = hSize * wSize * cSize;
+  for(int n = 0; n<nSize; n++) {
+    for(int y = 0; y<hSize; y++) {
+      for(int x = 0; x<wSize; x++) {
+        int symX = transpose ? y : x;
+        int symY = transpose ? x : y;
+        if(flipX)
+          symX = wSize - 1 - symX;
+        if(flipY)
+          symY = hSize - 1 - symY;
+        for(int c = 0; c<cSize; c++) {
+          int symC = c;
+          if(cSize == NNInputs::NUM_FEATURES_SPATIAL_V7 && (flipX != flipY)) {
+            if(c == 6) symC = 7;
+            else if(c == 7) symC = 6;
           }
-        }
-      }
-    }
-  }
-  else {
-    int ncSize = nSize * cSize;
-    int ncStride = hSize * wSize;
-    int hStride = wSize;
-    int wStride = 1;
-    int hBaseNew = 0; int hStrideNew = hStride;
-    int wBaseNew = 0; int wStrideNew = wStride;
-
-    if(flipY) { hBaseNew = (hSize-1) * hStrideNew; hStrideNew = -hStrideNew; }
-    if(flipX) { wBaseNew = (wSize-1) * wStrideNew; wStrideNew = -wStrideNew; }
-
-    if(transpose)
-      std::swap(hStrideNew,wStrideNew);
-
-    for(int nc = 0; nc<ncSize; nc++) {
-      for(int h = 0; h<hSize; h++) {
-        int nchOld = nc * ncStride + h*hStride;
-        int nchNew = nc * ncStride + hBaseNew + h*hStrideNew;
-        for(int w = 0; w<wSize; w++) {
-          int nchwOld = nchOld + w*wStride;
-          int nchwNew = nchNew + wBaseNew + w*wStrideNew;
-          dst[nchwNew] = src[nchwOld];
+          int rawIdx = useNHWC ? n*nStride + (y*wSize+x)*cSize+c : (n*cSize+c)*hSize*wSize + y*wSize+x;
+          int symIdx = useNHWC ? n*nStride + (symY*wSize+symX)*cSize+symC : (n*cSize+symC)*hSize*wSize + symY*wSize+symX;
+          if(reverse)
+            dst[rawIdx] = src[symIdx];
+          else
+            dst[symIdx] = src[rawIdx];
         }
       }
     }
@@ -266,8 +316,31 @@ void SymmetryHelpers::copyInputsWithSymmetry(const float* src, float* dst, int n
   copyWithSymmetry(src, dst, nSize, hSize, wSize, cSize, useNHWC, symmetry, false);
 }
 
-void SymmetryHelpers::copyOutputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int symmetry) {
+void SymmetryHelpers::copyOutputsWithSymmetry(
+  const float* src, float* dst, int nSize, int hSize, int wSize, int symmetry,
+  QuaxVariant variant, int boardXSize, int boardYSize
+) {
   copyWithSymmetry(src, dst, nSize, hSize, wSize, 1, false, symmetry, true);
+  if(QuaxVariantIO::hasDirectionalCrosscuts(variant)) {
+    for(int n = 0; n < nSize; n++) {
+      for(int rawPos = 0; rawPos < hSize*wSize; rawPos++) {
+        Loc rawLoc = NNPos::posToLoc(rawPos,boardXSize,boardYSize,variant,wSize,hSize);
+        if(rawLoc == Board::NULL_LOC)
+          continue;
+        Loc symLoc = getSymMoveLoc(rawLoc,boardXSize,boardYSize,variant,symmetry);
+        int symPos = NNPos::locToPos(symLoc,boardXSize,boardYSize,variant,wSize,hSize);
+        int symX = symPos % wSize;
+        int symY = symPos / wSize;
+        int tensorBoardLen = 2*boardXSize-1;
+        if((symmetry & 0x2) != 0)
+          symX += wSize-tensorBoardLen;
+        if((symmetry & 0x1) != 0)
+          symY += hSize-tensorBoardLen;
+        symPos = symY*wSize+symX;
+        dst[n*hSize*wSize+rawPos] = src[n*hSize*wSize+symPos];
+      }
+    }
+  }
 }
 
 int SymmetryHelpers::invert(int symmetry) {
@@ -283,15 +356,12 @@ int SymmetryHelpers::compose(int firstSymmetry, int nextSymmetry, int nextNextSy
 }
 
 Loc SymmetryHelpers::getSymLoc(int x, int y, int xSize, int ySize, int symmetry) {
-  bool transpose = (symmetry & 0x4) != 0;
-  bool flipX = (symmetry & 0x1) != 0;
+  assert(symmetry >= 0 && symmetry < NUM_SYMMETRIES);
+  bool flipX = (symmetry & 0x2) != 0;
   bool flipY = (symmetry & 0x1) != 0;
-  if(flipX) { x = xSize - x - 1; }
+  if(flipX) { x = xSize - 1 - (y & 1) - x; }
   if(flipY) { y = ySize - y - 1; }
-
-  if(transpose)
-    std::swap(x,y);
-  return Location::getLoc(x,y,transpose ? ySize : xSize);
+  return Location::getLoc(x,y,xSize);
 }
 
 Loc SymmetryHelpers::getSymLoc(int x, int y, const Board& board, int symmetry) {
@@ -301,6 +371,8 @@ Loc SymmetryHelpers::getSymLoc(int x, int y, const Board& board, int symmetry) {
 Loc SymmetryHelpers::getSymLoc(Loc loc, const Board& board, int symmetry) {
   if(loc == Board::NULL_LOC || loc == Board::PASS_LOC)
     return loc;
+  if(QuaxVariantIO::hasDirectionalCrosscuts(board.variant))
+    return getSymMoveLoc(loc,board,symmetry);
   return getSymLoc(Location::getX(loc,board.x_size), Location::getY(loc,board.x_size), board, symmetry);
 }
 
@@ -310,23 +382,71 @@ Loc SymmetryHelpers::getSymLoc(Loc loc, int xSize, int ySize, int symmetry) {
   return getSymLoc(Location::getX(loc,xSize), Location::getY(loc,xSize), xSize, ySize, symmetry);
 }
 
+static void getSymOctagonCoords(int& x, int& row, int size, int symmetry) {
+  if((symmetry & 0x4) != 0)
+    std::swap(x,row);
+  if((symmetry & 0x2) != 0)
+    x = size-1-x;
+  if((symmetry & 0x1) != 0)
+    row = size-1-row;
+}
+
+Loc SymmetryHelpers::getSymMoveLoc(Loc loc, int xSize, int ySize, QuaxVariant variant, int symmetry) {
+  assert(symmetry >= 0 && symmetry < 8);
+  assert(ySize == 2*xSize-1);
+  if(loc == Board::NULL_LOC || loc == Board::PASS_LOC)
+    return loc;
+  bool secondCrosscut = isSecondCrosscutLoc(loc,xSize,variant);
+  Loc physicalLoc = getPhysicalLoc(loc,xSize,variant);
+  int x = Location::getX(physicalLoc,xSize);
+  int y = Location::getY(physicalLoc,xSize);
+  if((y & 1) == 0) {
+    int row = y/2;
+    getSymOctagonCoords(x,row,xSize,symmetry);
+    return Location::getLoc(x,2*row,xSize);
+  }
+
+  int row = y/2;
+  if(variant == QuaxVariant::DoubleCrosscut) {
+    int cornersX[4] = {x,x+1,x,x+1};
+    int cornersR[4] = {row,row,row+1,row+1};
+    for(int i = 0; i < 4; i++)
+      getSymOctagonCoords(cornersX[i],cornersR[i],xSize,symmetry);
+    int symX = *std::min_element(cornersX,cornersX+4);
+    int symRow = *std::min_element(cornersR,cornersR+4);
+    return Location::getLoc(symX,2*symRow+1,xSize);
+  }
+
+  int ax = secondCrosscut ? x+1 : x;
+  int ar = row;
+  int bx = secondCrosscut ? x : x+1;
+  int br = row+1;
+  getSymOctagonCoords(ax,ar,xSize,symmetry);
+  getSymOctagonCoords(bx,br,xSize,symmetry);
+  int symX = std::min(ax,bx);
+  int symRow = std::min(ar,br);
+  Loc symDiamond = Location::getLoc(symX,2*symRow+1,xSize);
+  bool symSlash = (ax-bx)*(ar-br) < 0;
+  return symSlash ? getSecondCrosscutLoc(symDiamond,xSize) : symDiamond;
+}
+
+Loc SymmetryHelpers::getSymMoveLoc(Loc loc, const Board& board, int symmetry) {
+  return getSymMoveLoc(loc,board.x_size,board.y_size,board.variant,symmetry);
+}
+
 
 Board SymmetryHelpers::getSymBoard(const Board& board, int symmetry) {
-  bool transpose = (symmetry & 0x4) != 0;
-  bool flipX = (symmetry & 0x1) != 0;
-  bool flipY = (symmetry & 0x1) != 0;
-  Board symBoard(
-    transpose ? board.y_size : board.x_size,
-    transpose ? board.x_size : board.y_size
-  );
+  assert(symmetry >= 0 && symmetry < NUM_SYMMETRIES);
+  Board symBoard(board.x_size,board.y_size,board.variant);
   for(int y = 0; y<board.y_size; y++) {
     for(int x = 0; x<board.x_size; x++) {
       Loc loc = Location::getLoc(x,y,board.x_size);
-      int symX = flipX ? board.x_size - x - 1 : x;
-      int symY = flipY ? board.y_size - y - 1 : y;
-      if(transpose)
-        std::swap(symX,symY);
-      Loc symLoc = Location::getLoc(symX,symY,symBoard.x_size);
+      if(!board.isOnBoard(loc))
+        continue;
+      Loc moveLoc = loc;
+      if(board.crosscutDirections[loc] == CROSSCUT_SLASH)
+        moveLoc = board.getSecondCrosscutLoc(loc);
+      Loc symLoc = getSymMoveLoc(moveLoc,board,symmetry);
       bool suc = symBoard.setStone(symLoc,board.colors[loc]);
       assert(suc);
       (void)suc;
@@ -348,11 +468,7 @@ void SymmetryHelpers::markDuplicateMoveLocs(
   validSymmetries.reserve(SymmetryHelpers::NUM_SYMMETRIES);
   validSymmetries.push_back(0);
 
-
-  //If board has different sizes of x and y, we will not search symmetries involved with transpose.
-  int symmetrySearchUpperBound = SymmetryHelpers::NUM_SYMMETRIES;
-
-  for(int symmetry = 1; symmetry < symmetrySearchUpperBound; symmetry++) {
+  for(int symmetry = 1; symmetry < SymmetryHelpers::NUM_SYMMETRIES; symmetry++) {
     if(onlySymmetries != NULL && !contains(*onlySymmetries,symmetry))
       continue;
 
@@ -360,8 +476,14 @@ void SymmetryHelpers::markDuplicateMoveLocs(
     for(int y = 0; y < board.y_size; y++) {
       for(int x = 0; x < board.x_size; x++) {
         Loc loc = Location::getLoc(x, y, board.x_size);
-        Loc symLoc = getSymLoc(x, y, board,symmetry);
-        bool isStoneSym = (board.colors[loc] == board.colors[symLoc]);
+        if(!board.isOnBoard(loc))
+          continue;
+        Loc stateLoc = board.crosscutDirections[loc] == CROSSCUT_SLASH ? board.getSecondCrosscutLoc(loc) : loc;
+        Loc symMoveLoc = getSymMoveLoc(stateLoc,board,symmetry);
+        Loc symLoc = board.getPhysicalLoc(symMoveLoc);
+        bool isStoneSym = board.colors[loc] == board.colors[symLoc];
+        if(isStoneSym && board.colors[loc] != C_EMPTY && board.isDiamond(loc))
+          isStoneSym = board.crosscutDirections[loc] == board.getCrosscutDirectionForMove(symMoveLoc);
         if(!isStoneSym ) {
           isBoardSym = false;
           break;
@@ -374,22 +496,28 @@ void SymmetryHelpers::markDuplicateMoveLocs(
       validSymmetries.push_back(symmetry);
   }
 
-  //The way we iterate is to achieve https://senseis.xmp.net/?PlayingTheFirstMoveInTheUpperRightCorner%2FDiscussion
-  //Reverse the iteration order for white, so that natural openings result in white on the left and black on the right
-  //as is common now in SGFs
+  auto markSymmetricMoves = [&](Loc moveLoc) {
+    if(avoidMoves.size() > 0 && avoidMoves[moveLoc] > 0)
+      return;
+    for(int symmetry: validSymmetries) {
+      if(symmetry == 0)
+        continue;
+      Loc symLoc = getSymLoc(moveLoc,board,symmetry);
+      if(!isSymDupLoc[moveLoc] && moveLoc != symLoc)
+        isSymDupLoc[symLoc] = true;
+    }
+  };
+
+  //Use a deterministic player-dependent representative from each move orbit.
   if(hist.presumedNextMovePla == P_BLACK) {
     for(int x = board.x_size-1; x >= 0; x--) {
       for(int y = 0; y < board.y_size; y++) {
         Loc loc = Location::getLoc(x, y, board.x_size);
-        if(avoidMoves.size() > 0 && avoidMoves[loc] > 0)
+        if(!board.isOnBoard(loc))
           continue;
-        for(int symmetry: validSymmetries) {
-          if(symmetry == 0)
-            continue;
-          Loc symLoc = getSymLoc(x, y, board, symmetry);
-          if(!isSymDupLoc[loc] && loc != symLoc)
-            isSymDupLoc[symLoc] = true;
-        }
+        markSymmetricMoves(loc);
+        if(QuaxVariantIO::hasDirectionalCrosscuts(board.variant) && board.isDiamond(loc))
+          markSymmetricMoves(board.getSecondCrosscutLoc(loc));
       }
     }
   }
@@ -397,15 +525,11 @@ void SymmetryHelpers::markDuplicateMoveLocs(
     for(int x = 0; x < board.x_size; x++) {
       for(int y = board.y_size-1; y >= 0; y--) {
         Loc loc = Location::getLoc(x, y, board.x_size);
-        if(avoidMoves.size() > 0 && avoidMoves[loc] > 0)
+        if(!board.isOnBoard(loc))
           continue;
-        for(int symmetry: validSymmetries) {
-          if(symmetry == 0)
-            continue;
-          Loc symLoc = getSymLoc(x, y, board, symmetry);
-          if(!isSymDupLoc[loc] && loc != symLoc)
-            isSymDupLoc[symLoc] = true;
-        }
+        markSymmetricMoves(loc);
+        if(QuaxVariantIO::hasDirectionalCrosscuts(board.variant) && board.isDiamond(loc))
+          markSymmetricMoves(board.getSecondCrosscutLoc(loc));
       }
     }
   }
@@ -484,7 +608,7 @@ void NNInputs::fillRowV7(
 ) {
   assert(nnXLen <= NNPos::MAX_BOARD_LEN);
   assert(nnYLen <= NNPos::MAX_BOARD_LEN);
-  assert(board.x_size <= nnXLen);
+  assert(2 * board.x_size - 1 <= nnXLen);
   assert(board.y_size <= nnYLen);
   std::fill(rowBin,rowBin+NUM_FEATURES_SPATIAL_V7*nnXLen*nnYLen,false);
   std::fill(rowGlobal,rowGlobal+NUM_FEATURES_GLOBAL_V7,0.0f);
@@ -505,6 +629,18 @@ void NNInputs::fillRowV7(
     posStride = 1;
   }
 
+  if(QuaxVariantIO::hasDirectionalCrosscuts(board.variant)) {
+    int tensorBoardLen = 2*xSize-1;
+    for(int y = 0; y < tensorBoardLen; y++) {
+      for(int x = 0; x < tensorBoardLen; x++) {
+        int pos = NNPos::xyToPos(x,y,nnXLen);
+        setRowBin(rowBin,pos,0,1.0f,posStride,featureStride);
+        if((x & 1) != (y & 1))
+          setRowBin(rowBin,pos,8,1.0f,posStride,featureStride);
+      }
+    }
+  }
+
   GameLogic::ResultsBeforeNN resultsBeforeNN = nnInputParams.resultsBeforeNN;
   if(!resultsBeforeNN.inited) {
     resultsBeforeNN.init(board, hist, nextPlayer);
@@ -512,11 +648,15 @@ void NNInputs::fillRowV7(
 
   for(int y = 0; y<ySize; y++) {
     for(int x = 0; x<xSize; x++) {
-      int pos = NNPos::xyToPos(x,y,nnXLen);
       Loc loc = Location::getLoc(x,y,xSize);
 
-      //Feature 0 - on board
-      setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+      if(!board.isOnBoard(loc))
+        continue;
+
+      int pos = NNPos::boardLocToPos(loc,board,nnXLen,nnYLen);
+
+      if(board.variant == QuaxVariant::DoubleCrosscut)
+        setRowBin(rowBin,pos,0,1.0f,posStride,featureStride);
 
       Color stone = board.colors[loc];
 
@@ -527,23 +667,39 @@ void NNInputs::fillRowV7(
       else if(stone == opp)
         setRowBin(rowBin,pos,2, 1.0f, posStride, featureStride);
 
+      //Feature 5 distinguishes interstitial Quax diamonds from octagons.
+      if(board.isDiamond(loc))
+        setRowBin(rowBin,pos,5, 1.0f, posStride, featureStride);
+
+      CrosscutDirection direction = board.crosscutDirections[loc];
+      if(QuaxVariantIO::hasDirectionalCrosscuts(board.variant)) {
+        if(direction == CROSSCUT_BACKSLASH)
+          setRowBin(rowBin,pos,6,1.0f,posStride,featureStride);
+        if(direction == CROSSCUT_SLASH)
+          setRowBin(rowBin,pos,7,1.0f,posStride,featureStride);
+      }
+
     }
   }
 
   //policyLocalFocus
   if(
     nnInputParams.policyLocalFocusPow > 0 && hist.moveHistory.size() >= 1 &&
-    board.isOnBoard(hist.moveHistory[hist.moveHistory.size() - 1].loc)) {
+    board.isOnBoard(board.getPhysicalLoc(hist.moveHistory[hist.moveHistory.size()-1].loc))) {
     Loc lastMove = hist.moveHistory[hist.moveHistory.size() - 1].loc;
 
-    int pos = NNPos::locToPos(lastMove, board.x_size, nnXLen, nnYLen);
+    int pos = NNPos::locToPos(lastMove,board,nnXLen,nnYLen);
     setRowBin(rowBin, pos, 3, 1.0f, posStride, featureStride);
     rowGlobal[1] = 1.0;
     rowGlobal[2] = nnInputParams.policyLocalFocusPow * 3.0;
     rowGlobal[3] = 3.0 / nnInputParams.policyLocalFocusDist;
   }
 
-  rowGlobal[0] = nextPlayer == C_WHITE ? 1.0 : 0.0;
+  //The White position is transposed before reaching the net, so the current player's goal is always vertical.
+  rowGlobal[0] = 0.0;
+  rowGlobal[18] = QuaxVariantIO::hasDirectionalCrosscuts(board.variant) ? 1.0f : 0.0f;
+  if(QuaxVariantIO::hasDirectionalCrosscuts(board.variant))
+    rowGlobal[14] = nextPlayer == P_BLACK ? -nnInputParams.noResultUtilityForWhite : nnInputParams.noResultUtilityForWhite;
 
   //Global features.
   //The first 5 of them were set already above to flag which of the past 5 moves were passes.
@@ -553,13 +709,13 @@ void NNInputs::fillRowV7(
   else
     ASSERT_UNREACHABLE;
 
-  if(hist.rules.maxMoves > 0 && hist.rules.maxMoves < board.x_size * board.y_size) {
+  if(hist.rules.maxMoves > 0 && hist.rules.maxMoves < board.playableArea()) {
     rowGlobal[4] = 1.0;
     rowGlobal[14] =
       nextPlayer == P_BLACK ? -nnInputParams.noResultUtilityForWhite : nnInputParams.noResultUtilityForWhite;
     int mm = hist.rules.maxMoves;
     int movecount = board.numStonesOnBoard();
-    int area = board.x_size * board.y_size;
+    int area = board.playableArea();
     int remain = mm - movecount;
     if (remain <= 0)
     {

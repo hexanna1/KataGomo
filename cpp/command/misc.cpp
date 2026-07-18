@@ -54,7 +54,7 @@ static void writeLine(
   Loc moveLoc = Board::NULL_LOC;
   if(baseHist.moveHistory.size() > 0)
     moveLoc = baseHist.moveHistory[baseHist.moveHistory.size()-1].loc;
-  cout << NNPos::locToPos(moveLoc,board.x_size,nnXLen,nnYLen) << " ";
+  cout << NNPos::locToPos(moveLoc,board,nnXLen,nnYLen) << " ";
 
   cout << baseHist.moveHistory.size() << " ";
 
@@ -80,7 +80,7 @@ static void writeLine(
   cout << buf.size() << " ";
   for(int i = 0; i<buf.size(); i++) {
     const AnalysisData& data = buf[i];
-    cout << NNPos::locToPos(data.move,board.x_size,nnXLen,nnYLen) << " ";
+    cout << NNPos::locToPos(data.move,board,nnXLen,nnYLen) << " ";
     cout << data.numVisits << " ";
     cout << data.winLossValue << " ";
     cout << data.noResultValue << " ";
@@ -1401,7 +1401,7 @@ int MainCmds::dataminesgfs(const vector<string>& args) {
 
       if(m < sgfMoves.size()) {
         moves.push_back(sgfMoves[m]);
-        int pos = NNPos::locToPos(sgfMoves[m].loc,board.x_size,nnOutput->nnXLen,nnOutput->nnYLen);
+        int pos = NNPos::locToPos(sgfMoves[m].loc,board,nnOutput->nnXLen,nnOutput->nnYLen);
         policyPriors.push_back(nnOutput->policyProbs[pos]);
       }
 
@@ -1626,7 +1626,7 @@ int MainCmds::dataminesgfs(const vector<string>& args) {
         NNResultBuf buf;
         nnEval->evaluate(board,hist,pla,nnInputParams,buf,skipCache);
         shared_ptr<NNOutput>& nnOutput = buf.result;
-        int pos = NNPos::locToPos(sample.hintLoc,board.x_size,nnOutput->nnXLen,nnOutput->nnYLen);
+        int pos = NNPos::locToPos(sample.hintLoc,board,nnOutput->nnXLen,nnOutput->nnYLen);
         double prob = nnOutput->policyProbs[pos];
         assert(prob >= 0.0);
         acc += log(prob + 1e-30);

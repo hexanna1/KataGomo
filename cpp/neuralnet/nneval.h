@@ -48,6 +48,7 @@ struct NNResultBuf {
   bool hasResult;
   int boardXSizeForServer;
   int boardYSizeForServer;
+  QuaxVariant quaxVariantForServer;
   int rowSpatialSize;
   int rowGlobalSize;
   float* rowSpatial;
@@ -55,7 +56,7 @@ struct NNResultBuf {
   std::shared_ptr<NNOutput> result;
   bool errorLogLockout; //error flag to restrict log to 1 error to prevent spam
   int symmetry; //The symmetry to use for this eval
-  Player pla;           // only to decide Y symmetry
+  Player pla; //Selects the goal-axis canonicalization.
 
   NNResultBuf();
   ~NNResultBuf();

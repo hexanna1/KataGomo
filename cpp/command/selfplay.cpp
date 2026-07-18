@@ -3,7 +3,6 @@
 #include "../core/fileutils.h"
 #include "../core/makedir.h"
 #include "../core/config_parser.h"
-#include "../dataio/sgf.h"
 #include "../dataio/trainingwrite.h"
 #include "../dataio/loadmodel.h"
 #include "../neuralnet/modelversion.h"
@@ -89,8 +88,9 @@ int MainCmds::selfplay(const vector<string>& args) {
   const int numGameThreads = cfg.getInt("numGameThreads",1,16384);
   const string gameSeedBase = Global::uint64ToHexString(seedRand.nextUInt64());
 
-  //Width and height of the board to use when writing data, typically 19
-  const int dataBoardLen = cfg.getInt("dataBoardLen",3,127);
+  const int dataBoardLen = cfg.getInt("dataBoardLen",3,Board::MAX_LEN);
+  if(dataBoardLen % 2 == 0)
+    throw StringError("dataBoardLen must be odd for the square Quax tensor");
   const int inputsVersion =
     cfg.contains("inputsVersion") ?
     cfg.getInt("inputsVersion",0,10000) :
@@ -171,7 +171,6 @@ int MainCmds::selfplay(const vector<string>& args) {
     logger.write("Loaded latest neural net " + modelName + " from: " + modelFile);
 
     string modelOutputDir = outputDir + "/" + modelName;
-    string sgfOutputDir = modelOutputDir + "/sgfs";
     string tdataOutputDir = modelOutputDir + "/tdata";
     string vdataOutputDir = modelOutputDir + "/vdata";
 
@@ -182,7 +181,6 @@ int MainCmds::selfplay(const vector<string>& args) {
       bool success = false;
       try {
         MakeDir::make(modelOutputDir);
-        MakeDir::make(sgfOutputDir);
         MakeDir::make(tdataOutputDir);
         MakeDir::make(vdataOutputDir);
         success = true;
@@ -219,14 +217,9 @@ int MainCmds::selfplay(const vector<string>& args) {
       tdataOutputDir, inputsVersion, maxRowsPerTrainFile, firstFileRandMinProp, dataBoardLen, dataBoardLen, Global::uint64ToHexString(rand.nextUInt64()));
     TrainingDataWriter* vdataWriter = new TrainingDataWriter(
       vdataOutputDir, inputsVersion, maxRowsPerValFile, firstFileRandMinProp, dataBoardLen, dataBoardLen, Global::uint64ToHexString(rand.nextUInt64()));
-    ofstream* sgfOut = NULL;
-    if(sgfOutputDir.length() > 0) {
-      sgfOut = new ofstream();
-      FileUtils::open(*sgfOut, sgfOutputDir + "/" + Global::uint64ToHexString(rand.nextUInt64()) + ".sgfs");
-    }
 
     logger.write("Model loading loop thread loaded new neural net " + nnEval->getModelName());
-    manager->loadModelAndStartDataWriting(nnEval, tdataWriter, vdataWriter, sgfOut);
+    manager->loadModelAndStartDataWriting(nnEval, tdataWriter, vdataWriter, NULL);
     return true;
   };
 

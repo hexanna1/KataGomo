@@ -1527,7 +1527,10 @@ void NeuralNet::getOutput(
     // These are not actually correct, the client does the postprocessing to turn them into
     // policy probabilities and white game outcome probabilities
     // Also we don't fill in the nnHash here either
-    SymmetryHelpers::copyOutputsWithSymmetry(policySrcBuf, policyProbs, 1, nnYLen, nnXLen, inputBufs[row]->symmetry);
+    SymmetryHelpers::copyOutputsWithSymmetry(
+      policySrcBuf,policyProbs,1,nnYLen,nnXLen,inputBufs[row]->symmetry,
+      inputBufs[row]->quaxVariantForServer,inputBufs[row]->boardXSizeForServer,inputBufs[row]->boardYSizeForServer
+    );
     policyProbs[inputBuffers->singlePolicyResultElts - 1] = policySrcBuf[inputBuffers->singlePolicyResultElts - 1];
 
     int numValueChannels = inputBuffers->singleValueResultElts;

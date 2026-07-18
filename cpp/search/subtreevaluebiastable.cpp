@@ -55,7 +55,7 @@ void SubtreeValueBiasTable::clearUnusedSynchronous() {
 std::shared_ptr<SubtreeValueBiasEntry> SubtreeValueBiasTable::get(Player pla, Loc parentPrevMoveLoc, Loc prevMoveLoc, const Board& prevBoard) {
   Hash128 hash = ZOBRIST_MOVE_LOCS[parentPrevMoveLoc][0] ^ ZOBRIST_MOVE_LOCS[prevMoveLoc][1];
 
-  hash ^= patternHasher.getHash(prevBoard,prevMoveLoc,pla);
+  hash ^= patternHasher.getHash(prevBoard,prevBoard.getPhysicalLoc(prevMoveLoc),pla);
 
   uint32_t subMapIdx = (uint32_t)(hash.hash0 % entries.size());
 

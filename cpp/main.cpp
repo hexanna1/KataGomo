@@ -44,8 +44,6 @@ selfplay : Play selfplay games and generate training data.
 gatekeeper : Poll directory for new nets and match them against the latest net so far.
 
 ---Testing/debugging subcommands-------------
-evalsgf : Utility/debug tool, analyze a single position of a game from an SGF file.
-
 testgpuerror : Print the average error of the neural net between current config and fp32 config.
 
 
@@ -60,9 +58,7 @@ static int handleSubcommand(const string& subcommand, const vector<string>& args
     return MainCmds::benchmark(subArgs);
   if(subcommand == "contribute")
     return MainCmds::contribute(subArgs);
-  if(subcommand == "evalsgf")
-    return MainCmds::evalsgf(subArgs);
-  else if(subcommand == "gatekeeper")
+  if(subcommand == "gatekeeper")
     return MainCmds::gatekeeper(subArgs);
   else if(subcommand == "genconfig")
     return MainCmds::genconfig(subArgs,args[0]);
@@ -82,16 +78,10 @@ static int handleSubcommand(const string& subcommand, const vector<string>& args
     return MainCmds::samplesgfs(subArgs);
   else if(subcommand == "dataminesgfs")
     return MainCmds::dataminesgfs(subArgs);
-  else if(subcommand == "genbook")
-    return MainCmds::genbook(subArgs);
-  else if(subcommand == "checkbook")
-    return MainCmds::checkbook(subArgs);
   else if(subcommand == "trystartposes")
     return MainCmds::trystartposes(subArgs);
   else if(subcommand == "viewstartposes")
     return MainCmds::viewstartposes(subArgs);
-  else if(subcommand == "demoplay")
-    return MainCmds::demoplay(subArgs);
   else if(subcommand == "sampleinitializations")
     return MainCmds::sampleinitializations(subArgs);
   else if(subcommand == "printclockinfo")

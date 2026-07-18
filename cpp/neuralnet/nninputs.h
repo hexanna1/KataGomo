@@ -20,8 +20,11 @@ namespace NNPos {
   constexpr int EXTRA_SCORE_DISTR_RADIUS = 60;
 
   int xyToPos(int x, int y, int nnXLen);
-  int locToPos(Loc loc, int boardXSize, int nnXLen, int nnYLen);
-  Loc posToLoc(int pos, int boardXSize, int boardYSize, int nnXLen, int nnYLen);
+  int boardLocToPos(Loc loc, const Board& board, int nnXLen, int nnYLen);
+  int locToPos(Loc loc, int boardXSize, int boardYSize, QuaxVariant variant, int nnXLen, int nnYLen);
+  int locToPos(Loc loc, const Board& board, int nnXLen, int nnYLen);
+  Loc posToLoc(int pos, int boardXSize, int boardYSize, QuaxVariant variant, int nnXLen, int nnYLen);
+  Loc posToLoc(int pos, const Board& board, int nnXLen, int nnYLen);
   bool isPassPos(int pos, int nnXLen, int nnYLen);
   int getPolicySize(int nnXLen, int nnYLen);
 }
@@ -101,24 +104,25 @@ struct NNOutput {
   inline float* getPolicyProbsMaybeNoised() { return noisedPolicyProbs != NULL ? noisedPolicyProbs : policyProbs; }
   inline const float* getPolicyProbsMaybeNoised() const { return noisedPolicyProbs != NULL ? noisedPolicyProbs : policyProbs; }
   void debugPrint(std::ostream& out, const Board& board);
-  inline int getPos(Loc loc, const Board& board) const { return NNPos::locToPos(loc, board.x_size, nnXLen, nnYLen ); }
+  inline int getPos(Loc loc, const Board& board) const { return NNPos::locToPos(loc, board, nnXLen, nnYLen ); }
 };
 
 namespace SymmetryHelpers {
-  //A symmetry is 3 bits flipY(bit 0), flipX(bit 1), transpose(bit 2). They are applied in that order.
-  //The first four symmetries only reflect, and do not transpose X and Y.
-  constexpr int NUM_SYMMETRIES = 2;
+  //Player-preserving Quax symmetries: flipY(bit 0), flipX(bit 1).
+  //The internal transpose bit (bit 2) canonicalizes White for neural-net evaluation.
+  constexpr int NUM_SYMMETRIES = 4;
 
-  //These two IGNORE transpose if hSize and wSize do not match. So non-square transposes are disallowed.
   //copyOutputsWithSymmetry performs the inverse of symmetry.
   void copyInputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int cSize, bool useNHWC, int symmetry);
-  void copyOutputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int symmetry);
+  void copyOutputsWithSymmetry(const float* src, float* dst, int nSize, int hSize, int wSize, int symmetry, QuaxVariant variant, int boardXSize, int boardYSize);
 
   //Applies a symmetry to a location
   Loc getSymLoc(int x, int y, const Board& board, int symmetry);
   Loc getSymLoc(Loc loc, const Board& board, int symmetry);
   Loc getSymLoc(int x, int y, int xSize, int ySize, int symmetry);
   Loc getSymLoc(Loc loc, int xSize, int ySize, int symmetry);
+  Loc getSymMoveLoc(Loc loc, const Board& board, int symmetry);
+  Loc getSymMoveLoc(Loc loc, int xSize, int ySize, QuaxVariant variant, int symmetry);
 
   //Applies a symmetry to a board
   Board getSymBoard(const Board& board, int symmetry);
@@ -130,14 +134,13 @@ namespace SymmetryHelpers {
   int compose(int firstSymmetry, int nextSymmetry, int nextNextSymmetry);
 
   inline bool isTranspose(int symmetry) { return (symmetry & 0x4) != 0; }
-  inline bool isFlipX(int symmetry) { return (symmetry & 0x1) != 0; }
+  inline bool isFlipX(int symmetry) { return (symmetry & 0x2) != 0; }
   inline bool isFlipY(int symmetry) { return (symmetry & 0x1) != 0; }
 
   //Fill isSymDupLoc with true on all but one copy of each symmetrically equivalent move, and false everywhere else.
   //isSymDupLocs should be an array of size Board::MAX_ARR_SIZE
   //If onlySymmetries is not NULL, will only consider the symmetries specified there.
   //validSymmetries will be filled with all symmetries of the current board, including using history for checking ko/superko and some encore-related state.
-  //This implementation is dependent on specific order of the symmetries (i.e. transpose is coded as 0x4)
   //Will pretend moves that have a nonzero value in avoidMoves do not exist.
   void markDuplicateMoveLocs(
     const Board& board,

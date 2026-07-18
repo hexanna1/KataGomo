@@ -21,7 +21,7 @@ PlaySettings::PlaySettings()
     earlyDrawProbSelfplay(0.9),
    completelyRandomOpeningProb(0.1),
    completelyRandomOpeningFillRateAvg(0.01),
-   specialOpeningProb(0.02),
+   specialOpeningProb(0.0),
    forSelfPlay(false),
     normalAsymmetricPlayoutProb(0.0),
     maxAsymmetricRatio(2.0),
@@ -87,7 +87,7 @@ PlaySettings PlaySettings::loadForSelfplay(ConfigParser& cfg) {
   playSettings.completelyRandomOpeningFillRateAvg =
     cfg.contains("completelyRandomOpeningFillRateAvg") ? cfg.getDouble("completelyRandomOpeningFillRateAvg", 0.0, 0.5) : 0.01;
   playSettings.specialOpeningProb =
-    cfg.contains("specialOpeningProb") ? cfg.getDouble("specialOpeningProb", 0.0, 1.0) : 0.02;
+    cfg.contains("specialOpeningProb") ? cfg.getDouble("specialOpeningProb", 0.0, 1.0) : 0.0;
 
   playSettings.initGamesWithPolicy = cfg.getBool("initGamesWithPolicy");
   playSettings.policyInitAvgMoveNum =

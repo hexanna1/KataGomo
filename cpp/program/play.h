@@ -104,10 +104,8 @@ class GameInitializer {
   std::vector<int> allowedScoringRules;
   std::vector<int> allowedBSizes;
   std::vector<double> allowedBSizeRelProbs;
+  QuaxVariant quaxVariant;
 
-  double allowRectangleProb;
-
-  
   double noResultRandRadius;
 
   double moveLimitProb;

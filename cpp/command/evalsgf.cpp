@@ -345,7 +345,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
         }
         cout << endl;
       }
-      double prob = policyProbs[NNPos::locToPos(Board::PASS_LOC,board.x_size,nnOutput->nnXLen,nnOutput->nnYLen)];
+      double prob = policyProbs[NNPos::locToPos(Board::PASS_LOC,board,nnOutput->nnXLen,nnOutput->nnYLen)];
       cout << "Pass " << Global::strprintf("%5.2f",prob*100) << endl;
     }
   }
@@ -365,7 +365,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
         }
         cout << endl;
       }
-      double prob = policyProbs[NNPos::locToPos(Board::PASS_LOC,board.x_size,nnOutput->nnXLen,nnOutput->nnYLen)];
+      double prob = policyProbs[NNPos::locToPos(Board::PASS_LOC,board,nnOutput->nnXLen,nnOutput->nnYLen)];
       cout << "Pass " << Global::strprintf("%+5.2f",log(prob)) << endl;
     }
   }
@@ -389,7 +389,7 @@ int MainCmds::evalsgf(const vector<string>& args) {
         }
         cout << endl;
       }
-      double alpha = alphaDistr[NNPos::locToPos(Board::PASS_LOC,board.x_size,nnOutput->nnXLen,nnOutput->nnYLen)];
+      double alpha = alphaDistr[NNPos::locToPos(Board::PASS_LOC,board,nnOutput->nnXLen,nnOutput->nnYLen)];
       cout << "Pass " << Global::strprintf("%5.2f",alpha * 10.83) << endl;
     }
   }

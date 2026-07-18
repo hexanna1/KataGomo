@@ -7,6 +7,7 @@ using namespace std;
 
 template<typename T>
 static void selfTransposeNCHW(T* src, int n, int c, int h, int w) {
+  assert(h == w);
   T* buf = new T[n * c * h * w];
   for(int i = 0; i < n; i++) {
     for(int j = 0; j < c; j++) {
@@ -22,7 +23,7 @@ static void selfTransposeNCHW(T* src, int n, int c, int h, int w) {
   }
   std::copy(buf, buf + n * c * h * w, src);
 
-  delete buf;
+  delete[] buf;
 }
 
 ValueTargets::ValueTargets()
@@ -199,6 +200,7 @@ TrainingWriteBuffers::TrainingWriteBuffers(int iVersion, int maxRws, int numBCha
    scoreDistrN({maxRws, xLen * yLen * 2 + NNPos::EXTRA_SCORE_DISTR_RADIUS * 2}),
    valueTargetsNCHW({maxRws, VALUE_SPATIAL_TARGET_NUM_CHANNELS, yLen, xLen})
 {
+  assert(xLen == yLen);
   binaryInputNCHWUnpacked = new float[numBChannels * xLen * yLen];
 }
 
@@ -245,15 +247,32 @@ static void uniformPolicyTarget(int policySize, int16_t* target) {
 }
 
 //Copy playouts into target, expanding out the sparse representation into a full plane.
-static void fillPolicyTarget(const vector<PolicyTargetMove>& policyTargetMoves, int policySize, int dataXLen, int dataYLen, int boardXSize, int16_t* target) {
+static void fillPolicyTarget(const vector<PolicyTargetMove>& policyTargetMoves, int policySize, int dataXLen, int dataYLen, const Board& board, int16_t* target) {
   zeroPolicyTarget(policySize,target);
   size_t size = policyTargetMoves.size();
   for(size_t i = 0; i<size; i++) {
     const PolicyTargetMove& move = policyTargetMoves[i];
-    int pos = NNPos::locToPos(move.loc, boardXSize, dataXLen, dataYLen);
+    int pos = NNPos::locToPos(move.loc,board,dataXLen,dataYLen);
     assert(pos >= 0 && pos < policySize);
     target[pos] = move.policyTarget;
   }
+}
+
+static void transformPolicyTarget(int16_t* target, int dataXLen, int dataYLen, const Board& board, int symmetry) {
+  int policySize = NNPos::getPolicySize(dataXLen,dataYLen);
+  int16_t* copy = new int16_t[policySize];
+  std::copy(target,target+policySize,copy);
+  zeroPolicyTarget(policySize,target);
+  for(int pos = 0; pos < dataXLen*dataYLen; pos++) {
+    Loc loc = NNPos::posToLoc(pos,board,dataXLen,dataYLen);
+    if(loc == Board::NULL_LOC)
+      continue;
+    Loc symLoc = SymmetryHelpers::getSymMoveLoc(loc,board,symmetry);
+    int symPos = NNPos::locToPos(symLoc,board,dataXLen,dataYLen);
+    target[symPos] = copy[pos];
+  }
+  target[dataXLen*dataYLen] = copy[dataXLen*dataYLen];
+  delete[] copy;
 }
 
 
@@ -337,7 +356,7 @@ void TrainingWriteBuffers::addRow(
     }
     else
       ASSERT_UNREACHABLE;
-    
+
     if(nextPlayer == C_WHITE)
       selfTransposeNCHW(rowBin, 1, numBinaryChannels, dataYLen, dataXLen);
 
@@ -358,7 +377,7 @@ void TrainingWriteBuffers::addRow(
   int16_t* rowPolicy = policyTargetsNCMove.data + curRows * POLICY_TARGET_NUM_CHANNELS * policySize;
 
   if(policyTarget0 != NULL) {
-    fillPolicyTarget(*policyTarget0, policySize, dataXLen, dataYLen, board.x_size, rowPolicy + 0 * policySize);
+    fillPolicyTarget(*policyTarget0,policySize,dataXLen,dataYLen,board,rowPolicy+0*policySize);
     rowGlobal[26] = 1.0f;
   }
   else {
@@ -367,7 +386,7 @@ void TrainingWriteBuffers::addRow(
   }
 
   if(policyTarget1 != NULL) {
-    fillPolicyTarget(*policyTarget1, policySize, dataXLen, dataYLen, board.x_size, rowPolicy + 1 * policySize);
+    fillPolicyTarget(*policyTarget1,policySize,dataXLen,dataYLen,board,rowPolicy+1*policySize);
     rowGlobal[28] = 1.0f;
   }
   else {
@@ -376,12 +395,14 @@ void TrainingWriteBuffers::addRow(
   }
 
   if(nextPlayer == C_WHITE) {
-    for(int i = 0; i < POLICY_TARGET_NUM_CHANNELS; i++)
-      selfTransposeNCHW(rowPolicy + i * policySize, 1, 1, dataYLen, dataXLen);
+    if(policyTarget0 != NULL)
+      transformPolicyTarget(rowPolicy+0*policySize,dataXLen,dataYLen,board,0x4);
+    if(policyTarget1 != NULL)
+      transformPolicyTarget(rowPolicy+1*policySize,dataXLen,dataYLen,board,0x4);
   }
 
   //Fill td-like value targets
-  int boardArea = board.x_size * board.y_size;
+  int boardArea = board.playableArea();
   assert(whiteValueTargetsIdx >= 0 && whiteValueTargetsIdx < whiteValueTargets.size());
   fillValueTDTargets(whiteValueTargets, whiteValueTargetsIdx, nextPlayer, 0.0, rowGlobal);
   //These three constants used to be 'nicer' numbers 0.18, 0.06, 0.02, but we screwed up the functional form
@@ -523,8 +544,10 @@ void TrainingWriteBuffers::addRow(
     Player opp = getOpp(nextPlayer);
     for(int y = 0; y<board.y_size; y++) {
       for(int x = 0; x<board.x_size; x++) {
-        int pos = NNPos::xyToPos(x,y,dataXLen);
         Loc loc = Location::getLoc(x,y,board.x_size);
+        if(!board.isOnBoard(loc))
+          continue;
+        int pos = NNPos::boardLocToPos(loc,board,dataXLen,dataYLen);
         if(board2.colors[loc] == pla) rowOwnership[pos+posArea*2] = 1;
         else if(board2.colors[loc] == opp) rowOwnership[pos+posArea*2] = -1;
         if(board3.colors[loc] == pla) rowOwnership[pos+posArea*3] = 1;
@@ -540,7 +563,8 @@ void TrainingWriteBuffers::addRow(
   }
 
   if(nextPlayer == C_WHITE)
-    selfTransposeNCHW(rowOwnership, 1, 5, dataYLen, dataXLen);
+    selfTransposeNCHW(rowOwnership, 1, VALUE_SPATIAL_TARGET_NUM_CHANNELS, dataYLen, dataXLen);
+
   curRows++;
 }
 
