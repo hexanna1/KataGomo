@@ -1,30 +1,38 @@
-# KataHex 2024
-Latest release: https://github.com/hzyhhzy/KataGo/releases/tag/Hex_20240908   
-~300 elo stronger than 2022 version on 19x19 board   
-New feature: Move number limitation    
-## Results
-The length of the optimal Hex game on n\*n board is about **0.45\*n^2** according to KataHex     
-https://dev.to/hzyhhzy/analysis-of-the-length-of-optimal-games-of-hex-game-using-alphazero-like-ai-16n7   
-Some conjectures of "Template problems" of Hex    
-https://mathoverflow.net/questions/470376/connection-properties-of-a-single-stone-on-an-infinite-hex-board
+# KataHex
 
+This branch adapts KataGomo for Hex and related variants. Select the game with
+`hexVariant`: `hex` for standard Hex, `2v2` for four-seat team Hex, or `hexhex`
+for multi-cell moves.
 
-## Training schedule
-Scripts and parameters used in this run are in **./scripts**   
-   
-I will use **"RTX4090\*month"** or **"RTX4090\*day"** as the unit of training cost.    
-Total: **~6 RTX4090\*month**       
-    
+Standard Hex uses the usual rules: Black connects the top and bottom sides,
+White connects the left and right sides, and stones are never captured.
 
-The major part of this run is on 15x15 board to save money. **(~4 RTX4090\*month)**   
-The cost of every selfplay game on n\*n board is **O(n^4)** (CNN cost \* move number). Consider that larger boards usually need more search visits per move, it can even reach **O(n^7)**.    
-At the end it was trained on 19x19.**(~1 RTX4090\*month)**   
-And finally 27x27 **(~3 RTX4090\*day)**    
-    
-By experience, if the largest board the model trained is n \* n, the model will play well on boards < 1.5n \* 1.5n.    
-For example, for a model trained only on 15x15 and smaller boards, it plays well on 19x19 but not 27x27. After a short training on 19x19, it plays well on 27x27. At the end I trained it on 27x27, so it can barely play on a 41x41 board.
-    
-Later I implemented **"Move number limitation"** and continued training with this.   
-On 15x15: **~4 RTX4090\*day**   
-On 19x19: **~7 RTX4090\*day**   
-On 27x27: **~4 RTX4090\*day** but failed. The winrate becomes weird and the reason is still unknown.
+In 2v2 Hex, four seats move clockwise from the top-right corner and opposite
+seats form a team. The top-right and bottom-left obtuse seats play on their
+inclusive sides of the long diagonal. The bottom-right and top-left acute seats
+play on their inclusive sides of the short diagonal. Red occupies the obtuse
+seats and moves first. Team colors still alternate, while the active seat has
+period four. If a seat has no legal placement, play advances to the next seat.
+
+Allowing Red to occupy either pair of corners, either team to move first, and
+either direction of play gives eight rulesets. Board and color symmetries pair
+them into four equivalence classes:
+
+| Red-first representative | Equivalent Blue-first ruleset | Implemented |
+| --- | --- | --- |
+| Red at obtuse corners, clockwise | Blue at acute corners, counterclockwise | yes |
+| Red at obtuse corners, counterclockwise | Blue at acute corners, clockwise | no |
+| Red at acute corners, clockwise | Blue at obtuse corners, counterclockwise | no |
+| Red at acute corners, counterclockwise | Blue at obtuse corners, clockwise | yes (via an initial Red pass) |
+
+No symmetry identifies two different rows, but an initial Red pass followed by
+the corresponding symmetry transform links the first and fourth rows, and
+likewise the second and third. The `2v2` variant fixes the first representative;
+randomized openings make the network robust to the phase change needed to play
+the fourth.
+
+In Hexhex, a move chooses an on-board center and fills every empty cell among
+the center and its six neighbors. Occupied cells retain their existing colors,
+and neighbors outside the board are ignored. A center is legal when its clipped
+footprint contains at least one empty cell. The connection goals are the same as
+in standard Hex.

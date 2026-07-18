@@ -56,6 +56,7 @@ struct NNResultBuf {
   bool errorLogLockout; //error flag to restrict log to 1 error to prevent spam
   int symmetry; //The symmetry to use for this eval
   Player pla;           // only to decide Y symmetry
+  bool isTwoVTwo;
 
   NNResultBuf();
   ~NNResultBuf();

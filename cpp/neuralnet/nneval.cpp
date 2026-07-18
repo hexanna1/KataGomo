@@ -20,7 +20,8 @@ NNResultBuf::NNResultBuf()
     errorLogLockout(false),
     // If no symmetry is specified, it will use default or random based on config.
     symmetry(NNInputs::SYMMETRY_NOTSPECIFIED),
-    pla(C_EMPTY)
+    pla(C_EMPTY),
+    isTwoVTwo(false)
 {}
 
 NNResultBuf::~NNResultBuf() {
@@ -518,9 +519,9 @@ void NNEvaluator::serve(
           }
         }
         //transpose if player is white
-        if(buf.resultBufs[row]->pla == P_WHITE)
+        if(buf.resultBufs[row]->pla == P_WHITE && !buf.resultBufs[row]->isTwoVTwo)
           buf.resultBufs[row]->symmetry ^= 0x4;
-        else 
+        else if(buf.resultBufs[row]->pla != P_WHITE)
           assert(buf.resultBufs[row]->pla == P_BLACK);
       }
 
@@ -600,6 +601,7 @@ void NNEvaluator::evaluate(
   assert(!isKilled);
   buf.hasResult = false;
   buf.pla = nextPlayer;
+  buf.isTwoVTwo = board.variant == HexVariant::Hex2v2;
 
   if(board.x_size > nnXLen || board.y_size > nnYLen)
     throw StringError("NNEvaluator was configured with nnXLen = " + Global::intToString(nnXLen) +
@@ -705,7 +707,7 @@ void NNEvaluator::evaluate(
       for(int i = 0; i < policySize; i++) {
         Loc loc = NNPos::posToLoc(i, xSize, ySize, nnXLen, nnYLen);
         isLegal[i] = history.isLegal(board, loc, nextPlayer);
-        isDeadOrCaptured[i] = history.rules.maxMoves == 0 && board.isDeadOrCaptured(loc);
+        isDeadOrCaptured[i] = board.variant == HexVariant::Hex && history.rules.maxMoves == 0 && board.isDeadOrCaptured(loc);
         if(!isDeadOrCaptured[i])
           hasNonDeadMoves=true;
       }

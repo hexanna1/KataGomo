@@ -10,7 +10,6 @@ import time
 import logging
 import zipfile
 import shutil
-import psutil
 import json
 import hashlib
 import datetime
@@ -19,6 +18,11 @@ import gc
 import multiprocessing
 
 import numpy as np
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 keys = [
     "binaryInputNCHWPacked",
@@ -43,6 +47,8 @@ def joint_shuffle_take_first_n(n,arrs):
     return shuffled_arrs
 
 def memusage_mb():
+    if psutil is None:
+        return -1
     return psutil.Process(os.getpid()).memory_info().rss // 1048576
 
 def shardify(input_idx, input_file_group, num_out_files, out_tmp_dirs, keep_prob):

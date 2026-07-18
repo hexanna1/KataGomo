@@ -26,6 +26,7 @@ struct BoardHistory {
   Board recentBoards[NUM_RECENT_BOARDS];
   int currentRecentBoardIdx;
   Player presumedNextMovePla;
+  bool passIsLoss;
 
   //this is just reserved RAM. so no need to be filled in construct functions or copy functions
   int8_t bufferForCheckingWinner[Board::MAX_ARR_SIZE];
@@ -57,6 +58,12 @@ struct BoardHistory {
   void clear(const Board& board, Player pla, const Rules& rules);
   //Set the initial turn number. Affects nothing else.
   void setInitialTurnNumber(int n);
+  void setPassIsLoss(bool b);
+
+  int getCurrentTurnNumber() const;
+  int getTwoVTwoPhase() const;
+  static bool isTwoVTwoLocInPhase(const Board& board, Loc loc, int phase);
+  bool hasAnyTwoVTwoLegalPlacement(const Board& board, int phase) const;
 
   //Returns a copy of this board history rewound to the initial board, pla, etc, with other fields
   //(such as setInitialTurnNumber, setAssumeMultipleStartingBlackMovesAreHandicap) set identically.

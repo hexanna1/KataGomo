@@ -311,17 +311,25 @@ Color GameLogic::checkWinnerAfterPlayed(
   Player pla,
   Loc loc,
   int8_t* bufferForCheckingWinner) {
-  bool includeJumpConnection = hist.rules.maxMoves == 0;
+  bool includeJumpConnection = board.variant == HexVariant::Hex && hist.rules.maxMoves == 0;
   if(board.checkConnection(bufferForCheckingWinner, pla, includeJumpConnection))
     return pla;
 
-  if(loc == Board::PASS_LOC)
-    return getOpp(pla);  //pass is not allowed
+  if(loc == Board::PASS_LOC) {
+    if(board.variant == HexVariant::Hex2v2) {
+      int passedPhase = (hist.getTwoVTwoPhase() + 3) % 4;
+      if(!hist.hasAnyTwoVTwoLegalPlacement(board,passedPhase))
+        return C_WALL;
+    }
+    if(!hist.passIsLoss)
+      return C_WALL;
+    return getOpp(pla);
+  }
 
   //check maxmoves
   if (hist.rules.maxMoves > 0)
   {
-    int currentMovenum = board.numStonesOnBoard();
+    int currentMovenum = board.variant == HexVariant::Hexhex ? board.movenum : board.numStonesOnBoard();
     if(currentMovenum >= hist.rules.maxMoves)
       return C_EMPTY;
   }

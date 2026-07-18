@@ -317,7 +317,8 @@ Board SymmetryHelpers::getSymBoard(const Board& board, int symmetry) {
   bool flipY = (symmetry & 0x1) != 0;
   Board symBoard(
     transpose ? board.y_size : board.x_size,
-    transpose ? board.x_size : board.y_size
+    transpose ? board.x_size : board.y_size,
+    board.variant
   );
   for(int y = 0; y<board.y_size; y++) {
     for(int x = 0; x<board.x_size; x++) {
@@ -350,7 +351,7 @@ void SymmetryHelpers::markDuplicateMoveLocs(
 
 
   //If board has different sizes of x and y, we will not search symmetries involved with transpose.
-  int symmetrySearchUpperBound = SymmetryHelpers::NUM_SYMMETRIES;
+  int symmetrySearchUpperBound = board.variant == HexVariant::Hex2v2 ? 1 : SymmetryHelpers::NUM_SYMMETRIES;
 
   for(int symmetry = 1; symmetry < symmetrySearchUpperBound; symmetry++) {
     if(onlySymmetries != NULL && !contains(*onlySymmetries,symmetry))
@@ -527,6 +528,9 @@ void NNInputs::fillRowV7(
       else if(stone == opp)
         setRowBin(rowBin,pos,2, 1.0f, posStride, featureStride);
 
+      if(board.variant == HexVariant::Hex2v2 && BoardHistory::isTwoVTwoLocInPhase(board,loc,hist.getTwoVTwoPhase()))
+        setRowBin(rowBin,pos,4, 1.0f, posStride, featureStride);
+
     }
   }
 
@@ -544,6 +548,7 @@ void NNInputs::fillRowV7(
   }
 
   rowGlobal[0] = nextPlayer == C_WHITE ? 1.0 : 0.0;
+  rowGlobal[18] = board.variant == HexVariant::Hexhex ? 1.0f : board.variant == HexVariant::Hex2v2 ? -1.0f : 0.0f;
 
   //Global features.
   //The first 5 of them were set already above to flag which of the past 5 moves were passes.
@@ -558,7 +563,7 @@ void NNInputs::fillRowV7(
     rowGlobal[14] =
       nextPlayer == P_BLACK ? -nnInputParams.noResultUtilityForWhite : nnInputParams.noResultUtilityForWhite;
     int mm = hist.rules.maxMoves;
-    int movecount = board.numStonesOnBoard();
+    int movecount = board.variant == HexVariant::Hexhex ? board.movenum : board.numStonesOnBoard();
     int area = board.x_size * board.y_size;
     int remain = mm - movecount;
     if (remain <= 0)

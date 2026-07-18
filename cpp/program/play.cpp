@@ -50,6 +50,10 @@ void GameInitializer::initShared(ConfigParser& cfg, Logger& logger) {
   if(allowedScoringRules.size() <= 0)
     throw IOError("scoringRules must have at least one value in " + cfg.getFileName());
 
+  hexVariant = cfg.contains("hexVariant") ? HexVariantIO::parse(cfg.getString("hexVariant")) : HexVariant::Hex;
+  logger.write("Using Hex variant " + HexVariantIO::toString(hexVariant));
+  if(hexVariant != HexVariant::Hex && (cfg.contains("startPosesFromSgfDir") || cfg.contains("hintPosesDir")))
+    throw IOError("SGF start and hint positions are only supported for regular Hex in " + cfg.getFileName());
 
   allowedBSizes = cfg.getInts("bSizes", 2, Board::MAX_LEN);
   allowedBSizeRelProbs = cfg.getDoubles("bSizeRelProbs",0.0,1e100);
@@ -416,7 +420,7 @@ void GameInitializer::createGameSharedUnsynchronized(
     }
 
 
-    board = Board(xSize,ySize);
+    board = Board(xSize,ySize,hexVariant);
     pla = P_BLACK;
     hist.clear(board,pla,rules);
 
@@ -707,7 +711,8 @@ static void logSearch(Search* bot, Logger& logger, Loc loc, OtherGameProperties 
 
 static Loc chooseRandomForkingMove(const NNOutput* nnOutput, const Board& board, const BoardHistory& hist, Player pla, Rand& gameRand, Loc banMove) {
   double r = gameRand.nextDouble();
-  bool allowPass = true;
+  bool allowPass = board.variant != HexVariant::Hex2v2 ||
+    !hist.hasAnyTwoVTwoLegalPlacement(board,hist.getTwoVTwoPhase());
   //70% of the time, do a random temperature 1 policy move
   if(r < 0.70)
     return PlayUtils::chooseRandomPolicyMove(nnOutput, board, hist, pla, gameRand, 1.0, allowPass, banMove);
@@ -715,8 +720,10 @@ static Loc chooseRandomForkingMove(const NNOutput* nnOutput, const Board& board,
   else if(r < 0.95)
     return PlayUtils::chooseRandomPolicyMove(nnOutput, board, hist, pla, gameRand, 2.0, allowPass, banMove);
   //5% of the time, do a random legal move
-  else
-    return PlayUtils::chooseRandomLegalMove(board, hist, pla, gameRand, banMove);
+  else {
+    Loc passBan = allowPass ? banMove : Board::PASS_LOC;
+    return PlayUtils::chooseRandomLegalMove(board, hist, pla, gameRand, passBan);
+  }
 }
 
 static void extractPolicyTarget(
@@ -1270,7 +1277,7 @@ FinishedGameData* Play::runGame(
 
   // special opening
   if(!gameInited) {
-    if(gameRand.nextBool(playSettings.specialOpeningProb))
+    if(board.variant == HexVariant::Hex && gameRand.nextBool(playSettings.specialOpeningProb))
     {
       RandomOpening::initializeSpecialOpening(botB, botW, board, hist, pla, gameRand);
       gameInited = true;
@@ -1279,7 +1286,7 @@ FinishedGameData* Play::runGame(
 
   //random initial stones opening
   if(!gameInited) {
-    if(gameRand.nextBool(playSettings.completelyRandomOpeningProb)) {
+    if(board.variant != HexVariant::Hexhex && gameRand.nextBool(playSettings.completelyRandomOpeningProb)) {
       RandomOpening::initializeCompletelyRandomOpening(
         board, hist, pla, gameRand, playSettings.completelyRandomOpeningFillRateAvg);
       gameInited = true;
@@ -1302,7 +1309,8 @@ FinishedGameData* Play::runGame(
     }
   }
 
-  if(board.numStonesOnBoard() >= hist.rules.maxMoves)
+  int currentMoveCount = board.variant == HexVariant::Hexhex ? board.movenum : board.numStonesOnBoard();
+  if(currentMoveCount >= hist.rules.maxMoves)
     hist.rules.maxMoves = 0;
 
   if(playSettings.initGamesWithPolicy && otherGameProps.allowPolicyInit) {

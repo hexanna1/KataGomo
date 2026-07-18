@@ -96,10 +96,12 @@ Loc PlayUtils::getGameInitializationMove(
   testAssert(nnXLen > 0 && nnXLen < 100); //Just a sanity check to make sure no other crazy values have snuck in
   testAssert(nnYLen > 0 && nnYLen < 100); //Just a sanity check to make sure no other crazy values have snuck in
   int policySize = NNPos::getPolicySize(nnXLen,nnYLen);
+  bool allowPass = board.variant != HexVariant::Hex2v2 ||
+    !hist.hasAnyTwoVTwoLegalPlacement(board,hist.getTwoVTwoPhase());
   for(int movePos = 0; movePos<policySize; movePos++) {
     Loc moveLoc = NNPos::posToLoc(movePos,board.x_size,board.y_size,nnXLen,nnYLen);
     double policyProb = nnOutput->policyProbs[movePos];
-    if(!hist.isLegal(board,moveLoc,pla) || policyProb <= 0)
+    if((moveLoc == Board::PASS_LOC && !allowPass) || !hist.isLegal(board,moveLoc,pla) || policyProb <= 0)
       continue;
     locs.push_back(moveLoc);
     playSelectionValues.push_back(pow(policyProb,1.0/temperature));
@@ -409,5 +411,4 @@ Rules PlayUtils::genRandomRules(Rand& rand) {
 
   return rules;
 }
-
 

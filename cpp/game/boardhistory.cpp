@@ -15,6 +15,7 @@ BoardHistory::BoardHistory()
    recentBoards(),
    currentRecentBoardIdx(0),
    presumedNextMovePla(P_BLACK),
+   passIsLoss(true),
    isGameFinished(false),winner(C_EMPTY),
    isNoResult(false),isResignation(false)
 {
@@ -32,6 +33,7 @@ BoardHistory::BoardHistory(const Board& board, Player pla, const Rules& r)
    recentBoards(),
    currentRecentBoardIdx(0),
    presumedNextMovePla(pla),
+   passIsLoss(true),
    isGameFinished(false),winner(C_EMPTY),
    isNoResult(false),isResignation(false)
 {
@@ -48,6 +50,7 @@ BoardHistory::BoardHistory(const BoardHistory& other)
    recentBoards(),
    currentRecentBoardIdx(other.currentRecentBoardIdx),
    presumedNextMovePla(other.presumedNextMovePla),
+   passIsLoss(other.passIsLoss),
    isGameFinished(other.isGameFinished),winner(other.winner),
    isNoResult(other.isNoResult),isResignation(other.isResignation)
 {
@@ -67,6 +70,7 @@ BoardHistory& BoardHistory::operator=(const BoardHistory& other)
   std::copy(other.recentBoards, other.recentBoards+NUM_RECENT_BOARDS, recentBoards);
   currentRecentBoardIdx = other.currentRecentBoardIdx;
   presumedNextMovePla = other.presumedNextMovePla;
+  passIsLoss = other.passIsLoss;
   isGameFinished = other.isGameFinished;
   winner = other.winner;
   isNoResult = other.isNoResult;
@@ -84,6 +88,7 @@ BoardHistory::BoardHistory(BoardHistory&& other) noexcept
   recentBoards(),
   currentRecentBoardIdx(other.currentRecentBoardIdx),
   presumedNextMovePla(other.presumedNextMovePla),
+  passIsLoss(other.passIsLoss),
   isGameFinished(other.isGameFinished),winner(other.winner),
   isNoResult(other.isNoResult),isResignation(other.isResignation)
 {
@@ -100,6 +105,7 @@ BoardHistory& BoardHistory::operator=(BoardHistory&& other) noexcept
   std::copy(other.recentBoards, other.recentBoards+NUM_RECENT_BOARDS, recentBoards);
   currentRecentBoardIdx = other.currentRecentBoardIdx;
   presumedNextMovePla = other.presumedNextMovePla;
+  passIsLoss = other.passIsLoss;
   isGameFinished = other.isGameFinished;
   winner = other.winner;
   isNoResult = other.isNoResult;
@@ -135,11 +141,52 @@ void BoardHistory::clear(const Board& board, Player pla, const Rules& r) {
 BoardHistory BoardHistory::copyToInitial() const {
   BoardHistory hist(initialBoard, initialPla, rules);
   hist.setInitialTurnNumber(initialTurnNumber);
+  hist.setPassIsLoss(passIsLoss);
   return hist;
 }
 
 void BoardHistory::setInitialTurnNumber(int n) {
   initialTurnNumber = n;
+}
+
+void BoardHistory::setPassIsLoss(bool b) {
+  passIsLoss = b;
+}
+
+int BoardHistory::getCurrentTurnNumber() const {
+  return initialTurnNumber + (int)moveHistory.size();
+}
+
+int BoardHistory::getTwoVTwoPhase() const {
+  int phase = getCurrentTurnNumber() % 4;
+  return phase < 0 ? phase + 4 : phase;
+}
+
+bool BoardHistory::isTwoVTwoLocInPhase(const Board& board, Loc loc, int phase) {
+  if(!board.isOnBoard(loc))
+    return false;
+  int x = Location::getX(loc,board.x_size);
+  int y = Location::getY(loc,board.x_size);
+  int xMax = board.x_size - 1;
+  int yMax = board.y_size - 1;
+  switch(phase) {
+  case 0: return y * xMax <= x * yMax;
+  case 1: return x * yMax + y * xMax >= xMax * yMax;
+  case 2: return y * xMax >= x * yMax;
+  case 3: return x * yMax + y * xMax <= xMax * yMax;
+  default: ASSERT_UNREACHABLE;
+  }
+}
+
+bool BoardHistory::hasAnyTwoVTwoLegalPlacement(const Board& board, int phase) const {
+  for(int y = 0; y < board.y_size; y++) {
+    for(int x = 0; x < board.x_size; x++) {
+      Loc loc = Location::getLoc(x,y,board.x_size);
+      if(board.colors[loc] == C_EMPTY && isTwoVTwoLocInPhase(board,loc,phase))
+        return true;
+    }
+  }
+  return false;
 }
 
 void BoardHistory::printBasicInfo(ostream& out, const Board& board) const {
@@ -190,6 +237,13 @@ bool BoardHistory::isLegal(const Board& board, Loc moveLoc, Player movePla) cons
   if(!board.isLegal(moveLoc,movePla))
     return false;
 
+  if(board.variant == HexVariant::Hex2v2) {
+    if(movePla != presumedNextMovePla)
+      return false;
+    if(moveLoc != Board::PASS_LOC && !isTwoVTwoLocInPhase(board,moveLoc,getTwoVTwoPhase()))
+      return false;
+  }
+
   return true;
 }
 
@@ -197,10 +251,12 @@ bool BoardHistory::isLegal(const Board& board, Loc moveLoc, Player movePla) cons
 
 
 bool BoardHistory::isLegalTolerant(const Board& board, Loc moveLoc, Player movePla) const {
+  if(board.variant == HexVariant::Hex2v2)
+    return isLegal(board,moveLoc,movePla);
   return board.isLegal(moveLoc, movePla);
 }
 bool BoardHistory::makeBoardMoveTolerant(Board& board, Loc moveLoc, Player movePla) {
-  if(!board.isLegal(moveLoc,movePla))
+  if(!isLegalTolerant(board,moveLoc,movePla))
     return false;
   makeBoardMoveAssumeLegal(board,moveLoc,movePla);
   return true;
@@ -240,6 +296,8 @@ Hash128 BoardHistory::getSituationRulesHash(const Board& board, const BoardHisto
  //Note that board.pos_hash also incorporates the size of the board.
   Hash128 hash = board.pos_hash;
   hash ^= Board::ZOBRIST_PLAYER_HASH[nextPlayer];
+  if(board.variant == HexVariant::Hex2v2)
+    hash ^= Board::ZOBRIST_TURN_PHASE_HASH[hist.getTwoVTwoPhase()];
 
   //Fold in the ko, scoring, and suicide rules
   hash ^= Rules::ZOBRIST_SCORING_RULE_HASH[hist.rules.scoringRule];
@@ -256,5 +314,3 @@ Hash128 BoardHistory::getSituationRulesHash(const Board& board, const BoardHisto
 
   return hash;
 }
-
-

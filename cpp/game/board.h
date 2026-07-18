@@ -19,6 +19,18 @@
 
 struct Board;
 
+enum class HexVariant : int8_t {
+  Hex = 0,
+  Hexhex = 1,
+  Hex2v2 = 2,
+};
+
+namespace HexVariantIO {
+  std::string toString(HexVariant variant);
+  bool tryParse(const std::string& s, HexVariant& variant);
+  HexVariant parse(const std::string& s);
+}
+
 //Player
 typedef int8_t Player;
 static constexpr Player P_BLACK = 1;
@@ -111,6 +123,8 @@ struct Board
   static Hash128 ZOBRIST_LASTMOVE_HASH[MAX_ARR_SIZE];
   static Hash128 ZOBRIST_BOARD_HASH2[MAX_ARR_SIZE][4];
   static Hash128 ZOBRIST_PLAYER_HASH[4];
+  static Hash128 ZOBRIST_VARIANT_HASH[3];
+  static Hash128 ZOBRIST_TURN_PHASE_HASH[4];
   static const Hash128 ZOBRIST_GAME_IS_OVER;
 
   static bool IS_CAPTURETABLE_INITALIZED;
@@ -125,6 +139,7 @@ struct Board
   //Constructors---------------------------------
   Board();  //Create Board of size (DEFAULT_LEN,DEFAULT_LEN)
   Board(int x, int y); //Create Board of size (x,y)
+  Board(int x, int y, HexVariant variant);
   Board(const Board& other);
 
   Board& operator=(const Board&) = default;
@@ -134,6 +149,7 @@ struct Board
   bool isLegal(Loc loc, Player pla) const;
   //Check if this location is on the board
   bool isOnBoard(Loc loc) const;
+  void getHexhexFootprint(Loc center, Loc buf[7], int& len) const;
   //Is this board empty?
   bool isEmpty() const;
   //Count the number of stones on the board
@@ -167,6 +183,8 @@ struct Board
 
   static Board parseBoard(int xSize, int ySize, const std::string& s);
   static Board parseBoard(int xSize, int ySize, const std::string& s, char lineDelimiter);
+  static Board parseBoard(int xSize, int ySize, HexVariant variant, const std::string& s);
+  static Board parseBoard(int xSize, int ySize, HexVariant variant, const std::string& s, char lineDelimiter);
   static void printBoard(std::ostream& out, const Board& board, Loc markLoc, const std::vector<Move>* hist);
   static std::string toStringSimple(const Board& board, char lineDelimiter);
   static nlohmann::json toJson(const Board& board);
@@ -176,6 +194,7 @@ struct Board
 
   int x_size;                  //Horizontal size of board
   int y_size;                  //Vertical size of board
+  HexVariant variant;
   Color colors[MAX_ARR_SIZE];  //Color of each location on the board.
   int movenum; //how many moves
   int stonenum; //how many stones on board
@@ -187,7 +206,7 @@ struct Board
   short adj_offsets[8]; //Indices 0-3: Offsets to add for adjacent points. Indices 4-7: Offsets for diagonal points. 2 and 3 are +x and +y.
 
   private:
-  void init(int xS, int yS);
+  void init(int xS, int yS, HexVariant variant);
 
   friend std::ostream& operator<<(std::ostream& out, const Board& board);
 

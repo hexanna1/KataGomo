@@ -254,6 +254,8 @@ void Search::clearSearch() {
 }
 
 bool Search::isLegalTolerant(Loc moveLoc, Player movePla) const {
+  if(rootBoard.variant == HexVariant::Hex2v2)
+    return isLegalStrict(moveLoc,movePla);
   //If we somehow have the same player making multiple moves in a row (possible in GTP or an sgf file),
   //clear the ko loc - the simple ko loc of a player should not prohibit the opponent playing there!
   if(movePla != rootPla) {

@@ -4,6 +4,18 @@
 #include "../search/asyncbot.h"
 using namespace RandomOpening;
 
+static void setTwoVTwoStartingPhase(Board& board, BoardHistory& hist, Player& nextPlayer, Rand& gameRand) {
+  if(board.variant != HexVariant::Hex2v2)
+    return;
+  int phase = gameRand.nextUInt(4);
+  int initialTurnNumber = board.numStonesOnBoard();
+  initialTurnNumber += (phase - initialTurnNumber % 4 + 4) % 4;
+  nextPlayer = phase % 2 == 0 ? P_BLACK : P_WHITE;
+  auto rules = hist.rules;
+  hist.clear(board,nextPlayer,rules);
+  hist.setInitialTurnNumber(initialTurnNumber);
+}
+
 void RandomOpening::initializeBalancedRandomOpening(
   Search* botB,
   Search* botW,
@@ -26,7 +38,9 @@ void RandomOpening::initializeBalancedRandomOpening(
       Board boardCopy(board);
       BoardHistory histCopy(hist);
       Loc firstMove = Location::getLoc(firstx, firsty, board.x_size);
-      histCopy.makeBoardMoveAssumeLegal(boardCopy, firstMove, C_BLACK);
+      if(!histCopy.isLegal(boardCopy,firstMove,nextPlayer))
+        continue;
+      histCopy.makeBoardMoveAssumeLegal(boardCopy, firstMove, nextPlayer);
 
       NNResultBuf nnbuf;
       MiscNNInputParams nnInputParams;
@@ -267,6 +281,7 @@ void RandomOpening::initializeCompletelyRandomOpening(
   nextPlayer = gameRand.nextBool(0.5) ? C_BLACK : C_WHITE;
   auto rules = hist.rules;
   hist.clear(board, nextPlayer, rules);
+  setTwoVTwoStartingPhase(board,hist,nextPlayer,gameRand);
 }
 
 void RandomOpening::randomFillBoard(Board& board, Rand& gameRand, double bProb, double wProb) {

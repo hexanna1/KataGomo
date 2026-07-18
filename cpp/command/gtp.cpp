@@ -204,6 +204,7 @@ struct GTPEngine {
   NNEvaluator* nnEval;
   AsyncBot* bot;
   Rules currentRules; //Should always be the same as the rules in bot, if bot is not NULL.
+  HexVariant hexVariant;
 
   //Stores the params we want to be using during genmoves or analysis
   SearchParams params;
@@ -226,7 +227,7 @@ struct GTPEngine {
   double genmoveTimeSum;
 
   GTPEngine(
-    const string& modelFile, SearchParams initialParams, Rules initialRules,
+    const string& modelFile, SearchParams initialParams, Rules initialRules, HexVariant initialHexVariant,
     double staticPDA,
     double normAvoidRepeatedPatternUtility,
     double genmoveWRN, double analysisWRN,
@@ -242,6 +243,7 @@ struct GTPEngine {
      nnEval(NULL),
      bot(NULL),
      currentRules(initialRules),
+     hexVariant(initialHexVariant),
      params(initialParams),
      bTimeControls(),
      wTimeControls(),
@@ -343,7 +345,7 @@ struct GTPEngine {
     bot = new AsyncBot(params, nnEval, &logger, searchRandSeed);
     bot->setCopyOfExternalPatternBonusTable(patternBonusTable);
 
-    Board board(boardXSize,boardYSize);
+    Board board(boardXSize,boardYSize,hexVariant);
     Player pla = P_BLACK;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
@@ -353,6 +355,7 @@ struct GTPEngine {
 
   void setPositionAndRules(Player pla, const Board& board, const BoardHistory& h, const Board& newInitialBoard, Player newInitialPla, const vector<Move> newMoveHistory) {
     BoardHistory hist(h);
+    hist.setPassIsLoss(false);
 
     currentRules = hist.rules;
     bot->setPosition(pla,board,hist);
@@ -366,7 +369,7 @@ struct GTPEngine {
     assert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
+    Board board(newXSize,newYSize,hexVariant);
     Player pla = P_BLACK;
     BoardHistory hist(board,pla,currentRules);
     vector<Move> newMoveHistory;
@@ -378,7 +381,7 @@ struct GTPEngine {
     assert(bot->getRootHist().rules == currentRules);
     int newXSize = bot->getRootBoard().x_size;
     int newYSize = bot->getRootBoard().y_size;
-    Board board(newXSize,newYSize);
+    Board board(newXSize,newYSize,hexVariant);
     bool suc = board.setStones(initialStones);
     if(!suc)
       return false;
@@ -390,9 +393,10 @@ struct GTPEngine {
         return false;
       }
     }
-    Player pla = P_BLACK;
+    int initialTurnNumber = board.numStonesOnBoard();
+    Player pla = hexVariant == HexVariant::Hex2v2 && initialTurnNumber % 2 == 1 ? P_WHITE : P_BLACK;
     BoardHistory hist(board,pla,currentRules);
-    hist.setInitialTurnNumber(board.numStonesOnBoard()); //Heuristic to guess at what turn this is
+    hist.setInitialTurnNumber(initialTurnNumber);
     vector<Move> newMoveHistory;
     setPositionAndRules(pla,board,hist,board,pla,newMoveHistory);
     clearStatsForNewGame();
@@ -1185,6 +1189,8 @@ int MainCmds::gtp(const vector<string>& args) {
   if(startupPrintMessageToStderr && !logger.isLoggingToStderr()) {
     cerr << "Using " + initialRules.toStringMaybeNice() + " rules initially, unless GTP/GUI overrides this" << endl;
   }
+  HexVariant hexVariant = cfg.contains("hexVariant") ? HexVariantIO::parse(cfg.getString("hexVariant")) : HexVariant::Hex;
+  logger.write("Using Hex variant " + HexVariantIO::toString(hexVariant));
 
   SearchParams initialParams = Setup::loadSingleParams(cfg,Setup::SETUP_FOR_GTP);
   logger.write("Using " + Global::intToString(initialParams.numThreads) + " CPU thread(s) for search");
@@ -1230,7 +1236,7 @@ int MainCmds::gtp(const vector<string>& args) {
   Player perspective = Setup::parseReportAnalysisWinrates(cfg,C_EMPTY);
 
   GTPEngine* engine = new GTPEngine(
-    nnModelFile,initialParams,initialRules,
+    nnModelFile,initialParams,initialRules,hexVariant,
     staticPlayoutDoublingAdvantage,
     normalAvoidRepeatedPatternUtility, 
     genmoveWideRootNoise,analysisWideRootNoise,
@@ -2062,7 +2068,11 @@ int MainCmds::gtp(const vector<string>& args) {
 
 
     else if(command == "loadsgf") {
-      if(pieces.size() != 1 && pieces.size() != 2) {
+      if(engine->hexVariant != HexVariant::Hex) {
+        responseIsError = true;
+        response = "loadsgf is only supported for regular Hex";
+      }
+      else if(pieces.size() != 1 && pieces.size() != 2) {
         responseIsError = true;
         response = "Expected one or two arguments for loadsgf but got '" + Global::concat(pieces," ") + "'";
       }
@@ -2167,7 +2177,11 @@ int MainCmds::gtp(const vector<string>& args) {
     }
 
     else if(command == "printsgf") {
-      if(pieces.size() != 0 && pieces.size() != 1) {
+      if(engine->hexVariant != HexVariant::Hex) {
+        responseIsError = true;
+        response = "printsgf is only supported for regular Hex";
+      }
+      else if(pieces.size() != 0 && pieces.size() != 1) {
         responseIsError = true;
         response = "Expected zero or one argument for print but got '" + Global::concat(pieces," ") + "'";
       }

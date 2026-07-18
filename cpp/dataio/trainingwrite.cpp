@@ -338,7 +338,7 @@ void TrainingWriteBuffers::addRow(
     else
       ASSERT_UNREACHABLE;
     
-    if(nextPlayer == C_WHITE)
+    if(nextPlayer == C_WHITE && board.variant != HexVariant::Hex2v2)
       selfTransposeNCHW(rowBin, 1, numBinaryChannels, dataYLen, dataXLen);
 
     //Pack bools bitwise into uint8_t
@@ -375,7 +375,7 @@ void TrainingWriteBuffers::addRow(
     rowGlobal[28] = 0.0f;
   }
 
-  if(nextPlayer == C_WHITE) {
+  if(nextPlayer == C_WHITE && board.variant != HexVariant::Hex2v2) {
     for(int i = 0; i < POLICY_TARGET_NUM_CHANNELS; i++)
       selfTransposeNCHW(rowPolicy + i * policySize, 1, 1, dataYLen, dataXLen);
   }
@@ -539,7 +539,7 @@ void TrainingWriteBuffers::addRow(
     rowOwnership[i+posArea*4] = 0;
   }
 
-  if(nextPlayer == C_WHITE)
+  if(nextPlayer == C_WHITE && board.variant != HexVariant::Hex2v2)
     selfTransposeNCHW(rowOwnership, 1, 5, dataYLen, dataXLen);
   curRows++;
 }

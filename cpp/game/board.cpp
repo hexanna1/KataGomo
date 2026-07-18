@@ -25,11 +25,46 @@ Hash128 Board::ZOBRIST_PLAYER_HASH[4];
 Hash128 Board::ZOBRIST_MOVENUM_HASH[MAX_ARR_SIZE];
 Hash128 Board::ZOBRIST_LASTMOVE_HASH[MAX_ARR_SIZE];
 Hash128 Board::ZOBRIST_BOARD_HASH2[MAX_ARR_SIZE][4];
+Hash128 Board::ZOBRIST_VARIANT_HASH[3];
+Hash128 Board::ZOBRIST_TURN_PHASE_HASH[4];
 const Hash128 Board::ZOBRIST_GAME_IS_OVER = //Based on sha256 hash of Board::ZOBRIST_GAME_IS_OVER
   Hash128(0xb6f9e465597a77eeULL, 0xf1d583d960a4ce7fULL);
 
 bool Board::IS_CAPTURETABLE_INITALIZED = false;
 int8_t Board::CAPTURE_TABLE[4096];
+
+string HexVariantIO::toString(HexVariant variant) {
+  switch(variant) {
+  case HexVariant::Hex: return "hex";
+  case HexVariant::Hexhex: return "hexhex";
+  case HexVariant::Hex2v2: return "2v2";
+  default: ASSERT_UNREACHABLE;
+  }
+}
+
+bool HexVariantIO::tryParse(const string& s, HexVariant& variant) {
+  string lower = Global::toLower(Global::trim(s));
+  if(lower == "hex") {
+    variant = HexVariant::Hex;
+    return true;
+  }
+  if(lower == "hexhex") {
+    variant = HexVariant::Hexhex;
+    return true;
+  }
+  if(lower == "2v2") {
+    variant = HexVariant::Hex2v2;
+    return true;
+  }
+  return false;
+}
+
+HexVariant HexVariantIO::parse(const string& s) {
+  HexVariant variant;
+  if(!tryParse(s,variant))
+    throw StringError("Unknown Hex variant: " + s);
+  return variant;
+}
 //LOCATION--------------------------------------------------------------------------------
 Loc Location::getLoc(int x, int y, int x_size)
 {
@@ -73,12 +108,17 @@ bool Location::isAdjacent(Loc loc0, Loc loc1, int x_size)
 
 Board::Board()
 {
-  init(DEFAULT_LEN,DEFAULT_LEN);
+  init(DEFAULT_LEN,DEFAULT_LEN,HexVariant::Hex);
 }
 
 Board::Board(int x, int y)
 {
-  init(x,y);
+  init(x,y,HexVariant::Hex);
+}
+
+Board::Board(int x, int y, HexVariant v)
+{
+  init(x,y,v);
 }
 
 
@@ -86,6 +126,7 @@ Board::Board(const Board& other)
 {
   x_size = other.x_size;
   y_size = other.y_size;
+  variant = other.variant;
 
   memcpy(colors, other.colors, sizeof(Color)*MAX_ARR_SIZE);
 
@@ -96,7 +137,7 @@ Board::Board(const Board& other)
   memcpy(adj_offsets, other.adj_offsets, sizeof(short)*8);
 }
 
-void Board::init(int xS, int yS)
+void Board::init(int xS, int yS, HexVariant v)
 {
   assert(IS_ZOBRIST_INITALIZED);
   if(xS < 0 || yS < 0 || xS > MAX_LEN || yS > MAX_LEN)
@@ -104,6 +145,7 @@ void Board::init(int xS, int yS)
 
   x_size = xS;
   y_size = yS;
+  variant = v;
 
   for(int i = 0; i < MAX_ARR_SIZE; i++)
     colors[i] = C_WALL;
@@ -121,7 +163,7 @@ void Board::init(int xS, int yS)
     }
   }
 
-  pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size];
+  pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size] ^ ZOBRIST_VARIANT_HASH[(int)variant];
 
   Location::getAdjacentOffsets(adj_offsets,x_size);
 }
@@ -143,6 +185,11 @@ void Board::initHash()
 
   for(int i = 0; i<4; i++)
     ZOBRIST_PLAYER_HASH[i] = nextHash();
+
+  for(int i = 0; i<3; i++)
+    ZOBRIST_VARIANT_HASH[i] = nextHash();
+  for(int i = 0; i<4; i++)
+    ZOBRIST_TURN_PHASE_HASH[i] = nextHash();
 
   //Do this second so that the player and encore hashes are not
   //afffected by the size of the board we compile with.
@@ -188,16 +235,37 @@ bool Board::isOnBoard(Loc loc) const {
   return loc >= 0 && loc < MAX_ARR_SIZE && colors[loc] != C_WALL;
 }
 
+void Board::getHexhexFootprint(Loc center, Loc buf[7], int& len) const {
+  len = 0;
+  if(!isOnBoard(center))
+    return;
+  buf[len++] = center;
+  for(int i = 0; i < 6; i++) {
+    Loc loc = center + adj_offsets[i];
+    if(isOnBoard(loc))
+      buf[len++] = loc;
+  }
+}
+
 //Check if moving here is illegal.
 bool Board::isLegal(Loc loc, Player pla) const
 {
   if(pla != P_BLACK && pla != P_WHITE)
     return false;
-  return loc == PASS_LOC || (
-    loc >= 0 &&
-    loc < MAX_ARR_SIZE &&
-    (colors[loc] == C_EMPTY) 
-  );
+  if(loc == PASS_LOC)
+    return true;
+  if(variant != HexVariant::Hexhex)
+    return isOnBoard(loc) && colors[loc] == C_EMPTY;
+  if(!isOnBoard(loc))
+    return false;
+  Loc footprint[7];
+  int len;
+  getHexhexFootprint(loc,footprint,len);
+  for(int i = 0; i < len; i++) {
+    if(colors[footprint[i]] == C_EMPTY)
+      return true;
+  }
+  return false;
 }
 
 bool Board::isEmpty() const {
@@ -281,16 +349,28 @@ bool Board::setStones(std::vector<Move> placements) {
 //Plays the specified move, assuming it is legal.
 void Board::playMoveAssumeLegal(Loc loc, Player pla)
 {
-  pos_hash ^= ZOBRIST_MOVENUM_HASH[movenum];
+  if(variant != HexVariant::Hex2v2)
+    pos_hash ^= ZOBRIST_MOVENUM_HASH[movenum];
   movenum++;
-  pos_hash ^= ZOBRIST_MOVENUM_HASH[movenum];
+  if(variant != HexVariant::Hex2v2)
+    pos_hash ^= ZOBRIST_MOVENUM_HASH[movenum];
 
   //Pass?
   if(loc == PASS_LOC)
   {
     return;
   }
-  setStone(loc, pla);
+  if(variant != HexVariant::Hexhex)
+    setStone(loc, pla);
+  else {
+    Loc footprint[7];
+    int len;
+    getHexhexFootprint(loc,footprint,len);
+    for(int i = 0; i < len; i++) {
+      if(colors[footprint[i]] == C_EMPTY)
+        setStone(footprint[i],pla);
+    }
+  }
 
 }
 
@@ -309,7 +389,7 @@ void Board::checkConsistency() const {
 
 
   vector<Loc> buf;
-  Hash128 tmp_pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size];
+  Hash128 tmp_pos_hash = ZOBRIST_SIZE_X_HASH[x_size] ^ ZOBRIST_SIZE_Y_HASH[y_size] ^ ZOBRIST_VARIANT_HASH[(int)variant];
   int emptyCount = 0;
   for(Loc loc = 0; loc < MAX_ARR_SIZE; loc++) {
     int x = Location::getX(loc,x_size);
@@ -331,7 +411,8 @@ void Board::checkConsistency() const {
     }
   }
 
-  tmp_pos_hash ^= ZOBRIST_MOVENUM_HASH[movenum];
+  if(variant != HexVariant::Hex2v2)
+    tmp_pos_hash ^= ZOBRIST_MOVENUM_HASH[movenum];
 
   if(pos_hash != tmp_pos_hash)
     throw StringError(errLabel + "Pos hash does not match expected");
@@ -353,6 +434,8 @@ bool Board::isEqualForTesting(const Board& other) const {
   if(x_size != other.x_size)
     return false;
   if(y_size != other.y_size)
+    return false;
+  if(variant != other.variant)
     return false;
   if(pos_hash != other.pos_hash)
     return false;
@@ -673,11 +756,19 @@ string Board::toStringSimple(const Board& board, char lineDelimiter) {
 }
 
 Board Board::parseBoard(int xSize, int ySize, const string& s) {
-  return parseBoard(xSize,ySize,s,'\n');
+  return parseBoard(xSize,ySize,HexVariant::Hex,s,'\n');
 }
 
 Board Board::parseBoard(int xSize, int ySize, const string& s, char lineDelimiter) {
-  Board board(xSize,ySize);
+  return parseBoard(xSize,ySize,HexVariant::Hex,s,lineDelimiter);
+}
+
+Board Board::parseBoard(int xSize, int ySize, HexVariant variant, const string& s) {
+  return parseBoard(xSize,ySize,variant,s,'\n');
+}
+
+Board Board::parseBoard(int xSize, int ySize, HexVariant variant, const string& s, char lineDelimiter) {
+  Board board(xSize,ySize,variant);
   vector<string> lines = Global::split(Global::trim(s),lineDelimiter);
 
   //Throw away coordinate labels line if it exists
@@ -730,6 +821,7 @@ nlohmann::json Board::toJson(const Board& board) {
   nlohmann::json data;
   data["xSize"] = board.x_size;
   data["ySize"] = board.y_size;
+  data["variant"] = HexVariantIO::toString(board.variant);
   data["stones"] = Board::toStringSimple(board,'|');
   return data;
 }
@@ -737,7 +829,7 @@ nlohmann::json Board::toJson(const Board& board) {
 Board Board::ofJson(const nlohmann::json& data) {
   int xSize = data["xSize"].get<int>();
   int ySize = data["ySize"].get<int>();
-  Board board = Board::parseBoard(xSize,ySize,data["stones"].get<string>(),'|');
+  HexVariant variant = HexVariantIO::parse(data["variant"].get<string>());
+  Board board = Board::parseBoard(xSize,ySize,variant,data["stones"].get<string>(),'|');
   return board;
 }
-

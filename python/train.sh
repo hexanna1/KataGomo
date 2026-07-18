@@ -1,4 +1,5 @@
 #!/bin/bash -eu
+set -eu
 set -o pipefail
 {
 #Runs tensorflow training in $BASEDIR/train/$TRAININGNAME
@@ -27,6 +28,10 @@ BATCHSIZE="$1"
 shift
 EXPORTMODE="$1"
 shift
+POS_LEN="${POS_LEN:-15}"
+TRAIN_DEVICE="${TRAIN_DEVICE:-auto}"
+USE_FP16="${USE_FP16:-auto}"
+PYTHON="${PYTHON:-python3}"
 
 GITROOTDIR="$(git rev-parse --show-toplevel)"
 
@@ -39,7 +44,7 @@ mkdir -p "$BASEDIR"/train/"$TRAININGNAME"
 DATE_FOR_FILENAME=$(date "+%Y%m%d-%H%M%S")
 DATED_ARCHIVE="$BASEDIR"/scripts/train/dated/"$DATE_FOR_FILENAME"
 mkdir -p "$DATED_ARCHIVE"
-cp "$GITROOTDIR"/python/*.py "$GITROOTDIR"/python/selfplay/train.sh "$DATED_ARCHIVE"
+cp "$GITROOTDIR"/python/*.py "$GITROOTDIR"/python/train.sh "$DATED_ARCHIVE"
 
 
 if [ "$EXPORTMODE" == "main" ]
@@ -59,26 +64,55 @@ else
     exit 1
 fi
 
+if [ "$USE_FP16" == "auto" ]
+then
+    if [ "$TRAIN_DEVICE" == "cuda" ]
+    then
+        USE_FP16=1
+    elif [ "$TRAIN_DEVICE" == "auto" ] && "$PYTHON" - <<'PY'
+import torch
+raise SystemExit(0 if torch.cuda.is_available() else 1)
+PY
+    then
+        USE_FP16=1
+    else
+        USE_FP16=0
+    fi
+fi
+
+DEVICE_ARGS=(-device "$TRAIN_DEVICE")
+case "$USE_FP16" in
+    1|true|TRUE|yes|YES)
+        DEVICE_ARGS+=(-use-fp16)
+        ;;
+    0|false|FALSE|no|NO)
+        ;;
+    *)
+        echo "USE_FP16 must be auto, 1, or 0"
+        exit 1
+        ;;
+esac
+
    # -main-loss-scale 1.0 \
     #-intermediate-loss-scale 0.0 \
-time python ./train.py \
+time "$PYTHON" ./train.py \
      -traindir "$BASEDIR"/train/"$TRAININGNAME" \
      -datadir "$BASEDIR"/shuffleddata/current/ \
      -exportdir "$BASEDIR"/"$EXPORT_SUBDIR" \
      -exportprefix "$TRAININGNAME" \
-     -pos-len 15 \
+     -pos-len "$POS_LEN" \
      -batch-size "$BATCHSIZE" \
      -model-kind "$MODELKIND" \
      -max-epochs-this-instance 1 \
      -lr-scale 1\
      -samples-per-epoch 2000000 \
-    -soft-policy-weight-scale 8.0 \
-    -value-loss-scale 0.6 \
-    -td-value-loss-scales 0.6,0.6,0.6 \
-    -lookahead-alpha 0.5 \
-    -lookahead-k 6 \
-    -swa-scale 1.0 \
-    -use-fp16 \
+     -soft-policy-weight-scale 8.0 \
+     -value-loss-scale 0.6 \
+     -td-value-loss-scales 0.6,0.6,0.6 \
+     -lookahead-alpha 0.5 \
+     -lookahead-k 6 \
+     -swa-scale 1.0 \
+     "${DEVICE_ARGS[@]}" \
      $EXTRAFLAG \
      "$@" \
      2>&1 | tee -a "$BASEDIR"/train/"$TRAININGNAME"/stdout.txt
